@@ -46,11 +46,12 @@ if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.event.filter import on_waiting_llm_request
+from astrbot.api.event.filter import on_llm_request, on_waiting_llm_request
 from astrbot.api.star import Context, Star
 
 from circle_memory_core.codes import CodeManager
 from circle_memory_core.commands import CommandHandlers
+from circle_memory_core.context_enhance import ContextEnhancer
 from circle_memory_core.constants import (
     KNOWN_COMMANDS,
     MAX_CODE_ATTEMPTS,
@@ -65,6 +66,7 @@ from circle_memory_core.groups import (
     is_shared_command,
     list_group_views,
     normalize_groups,
+    resolve_alias_target,
     resolve_remove_target,
     resolve_target_group,
     transfer_ownership,
@@ -89,6 +91,7 @@ __all__ = [
     "generate_group_id",
     "normalize_groups",
     "group_cid",
+    "resolve_alias_target",
     "resolve_remove_target",
     "resolve_target_group",
     "list_group_views",
@@ -107,6 +110,7 @@ class CircleMemoryStar(Star):
         self.codes = CodeManager()
         self.sessions = SharedSessionManager(self)
         self.handlers = CommandHandlers(self, self.codes, self.sessions)
+        self.enhancer = ContextEnhancer(self)
 
         # 为旧配置中缺失 id 的组补充组 ID（幂等）
         try:
@@ -180,6 +184,9 @@ class CircleMemoryStar(Star):
     async def _cmd_remove(self, event, arg: str):
         return await self.handlers.cmd_remove(event, arg)
 
+    async def _cmd_alias(self, event, arg: str = ""):
+        return await self.handlers.cmd_alias(event, arg)
+
     async def _cmd_list(self, event):
         return await self.handlers.cmd_list(event)
 
@@ -196,8 +203,16 @@ class CircleMemoryStar(Star):
 
     @on_waiting_llm_request(priority=200)
     async def on_waiting_llm_request(self, event: AstrMessageEvent):
-        """LLM 请求前钩子。任何异常都不允许打断用户请求，放行原流程。"""
+        """LLM 请求前钩子（build 之前）：切换共享会话。异常放行原流程。"""
         try:
             await self.sessions.ensure_llm_shared(event)
         except Exception as e:
             logger.error("[CircleMemory] 请求前共享处理失败（已放行原流程）: %s", e, exc_info=True)
+
+    @on_llm_request(priority=100)
+    async def on_llm_request_hook(self, event: AstrMessageEvent, req):
+        """LLM 请求构建后钩子：共享会话上下文增强（媒体降级/成员标注/预算折叠）。"""
+        try:
+            await self.enhancer.apply(event, req)
+        except Exception as e:
+            logger.error("[CircleMemory] 请求增强失败（已放行原请求）: %s", e)

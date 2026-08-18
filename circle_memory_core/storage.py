@@ -66,6 +66,17 @@ def save_merged(config, merged: dict) -> None:
         logger.error("[CircleMemory] 保存 merged 失败: %s", e)
 
 
+def save_aliases(config, aliases: dict) -> None:
+    """保存成员昵称映射（组名 → {UMO: 昵称}）。"""
+    config["aliases"] = aliases
+    try:
+        if hasattr(config, "save_config"):
+            config.save_config()
+            logger.info("[CircleMemory] aliases 已保存")
+    except Exception as e:
+        logger.error("[CircleMemory] 保存 aliases 失败: %s", e)
+
+
 def find_group(config, name: str) -> dict | None:
     """按组名查找组配置；不存在返回 None（不做假设，调用方自行处理）。"""
     for g in config.get("user_groups", []):

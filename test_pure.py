@@ -297,6 +297,100 @@ def test_archive_roundtrip_and_cleanup():
     print("PASS archive roundtrip + cleanup + personal export")
 
 
+def test_resolve_alias_target():
+    """alias 参数解析：省略组名/显式组名/查看模式/无法解析。"""
+    from main import resolve_alias_target  # noqa: F401
+    groups = [{"name": "fam", "umos": ["feishu::u1", "qq::u2"], "owner": "feishu::u1"}]
+    # 省略组名：UMO + 昵称
+    assert resolve_alias_target("qq::u2 阿Q", groups, "feishu::u1") == ("fam", "qq::u2", "阿Q")
+    # 显式组名
+    assert resolve_alias_target("fam qq::u2 阿Q", groups, "feishu::u1") == ("fam", "qq::u2", "阿Q")
+    # 删除标记
+    assert resolve_alias_target("qq::u2 -", groups, "feishu::u1") == ("fam", "qq::u2", "-")
+    # 查看模式（0-1 词）→ None
+    assert resolve_alias_target("", groups, "feishu::u1") is None
+    assert resolve_alias_target("fam", groups, "feishu::u1") is None
+    # 组外省略组名 → None
+    assert resolve_alias_target("qq::u2 阿Q", groups, "telegram::x") is None
+    # 未知组名 → None
+    assert resolve_alias_target("nope qq::u2 阿Q", groups, "feishu::u1") is None
+    # 四个词 → None
+    assert resolve_alias_target("a b c d", groups, "feishu::u1") is None
+
+
+def test_context_enhancer_media_and_budget():
+    """增强器：媒体降级（placeholder/ignore）与预算折叠（不调 provider）。"""
+    from types import SimpleNamespace
+
+    from circle_memory_core.context_enhance import ContextEnhancer
+
+    class FakeCtx:
+        def get_using_provider(self, umo=None):
+            return None
+
+    config = {"merged": {"fam": "g-1"}, "media_mode": "placeholder", "history_budget": 0}
+    star = SimpleNamespace(config=config, context=FakeCtx())
+    enh = ContextEnhancer(star)
+
+    req = SimpleNamespace(
+        conversation=SimpleNamespace(cid="g-1"),
+        system_prompt="原系统提示",
+        image_urls=["http://x/img.png"],
+        contexts=[
+            {"role": "user", "content": [
+                {"type": "text", "text": "看这张图"},
+                {"type": "image_url", "image_url": {"url": "http://x/img.png"}},
+            ]},
+            {"role": "assistant", "content": "好的"},
+        ],
+    )
+    import asyncio
+    asyncio.run(enh.apply(None, req))
+    parts = req.contexts[0]["content"]
+    assert parts[-1] == {"type": "text", "text": "[图片]"}, f"占位失败: {parts}"
+
+    # ignore 模式：图片部件被移除
+    config["media_mode"] = "ignore"
+    req2 = SimpleNamespace(
+        conversation=SimpleNamespace(cid="g-1"),
+        system_prompt="原系统提示",
+        image_urls=["http://x/img.png"],
+        contexts=[{"role": "user", "content": [
+            {"type": "text", "text": "看"}, {"type": "image_url", "image_url": {"url": "http://x/img.png"}},
+        ]}],
+    )
+    asyncio.run(enh.apply(None, req2))
+    assert all(p.get("type") != "image_url" for p in req2.contexts[0]["content"])
+    assert req2.image_urls == []
+
+    # 非共享会话：不处理
+    req3 = SimpleNamespace(
+        conversation=SimpleNamespace(cid="other-cid"),
+        system_prompt="原系统提示",
+        image_urls=["http://x/img.png"],
+        contexts=[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x/img.png"}}]}],
+    )
+    asyncio.run(enh.apply(None, req3))
+    assert req3.contexts[0]["content"][0]["type"] == "image_url", "非共享会话不应被处理"
+
+    # 预算折叠（无 provider → 退化省略标记）
+    config["history_budget"] = 100
+    config["summary_enabled"] = False
+    long_ctx = [{"role": "user", "content": "x" * 200}] * 20
+    req4 = SimpleNamespace(
+        conversation=SimpleNamespace(cid="g-1"),
+        system_prompt="原系统提示",
+        image_urls=[],
+        contexts=list(long_ctx),
+    )
+    asyncio.run(enh.apply(None, req4))
+    texts = "".join(c.get("content", "") for c in req4.contexts)
+    assert "折叠省略" in texts, f"应折叠: {req4.contexts[1]}"
+    assert len(req4.contexts) < 20, f"应减少消息数: {len(req4.contexts)}"
+
+    print("PASS enhancer media mode + budget folding")
+
+
 if __name__ == "__main__":
     test_umo_match()
     test_group_for_umo()
@@ -315,4 +409,6 @@ if __name__ == "__main__":
     test_transfer_ownership_after_leave()
     test_resolve_remove_target()
     test_archive_roundtrip_and_cleanup()
+    test_resolve_alias_target()
+    test_context_enhancer_media_and_budget()
     print("OK: 全部断言通过")

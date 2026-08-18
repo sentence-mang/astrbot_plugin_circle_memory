@@ -245,10 +245,11 @@ async def test_group_without_id_is_rejected_safely(tmp):
 class FakeEvent:
     """命令级测试用的事件桩：记录回复，支持 role 权限。"""
 
-    def __init__(self, umo, role="member", sender_name=None):
+    def __init__(self, umo, role="member", sender_name=None, message_str=""):
         self.unified_msg_origin = umo
         self.role = role
         self.sender_name = sender_name or umo.split(":")[-1]
+        self.message_str = message_str
         self.replies = []
 
     def get_sender_name(self):
@@ -447,6 +448,99 @@ async def test_leave_last_member_dissolves_group(tmp):
     print("PASS leave last member dissolves group")
 
 
+
+
+async def test_alias_set_and_permission(tmp):
+    """alias：本人可设自己；owner 可设任意成员；非本人非 owner 拒绝；删除与查看。"""
+    cm = await make_cm(tmp)
+    groups = [{
+        "name": "fam", "id": "g-aaaaaaaa",
+        "umos": ["feishu::u1", "qq::u2"], "owner": "feishu::u1",
+    }]
+    config = {"user_groups": groups, "merged": {"fam": "g-aaaaaaaa"}}
+    star = CircleMemoryStar(None, config)
+    star.context = SimpleNamespace(conversation_manager=cm)
+
+    # 1) 本人设置自己的昵称
+    member = FakeEvent("qq::u2", role="member")
+    await star._cmd_alias(member, "qq::u2 阿Q")
+    assert config["aliases"]["fam"]["qq::u2"] == "阿Q", config["aliases"]
+
+    # 2) 非本人非 owner 尝试设置他人 → 拒绝
+    member2 = FakeEvent("qq::u2", role="member")
+    await star._cmd_alias(member2, "feishu::u1 老板")
+    assert "只能设置" in member2.replies[0][1], member2.replies[0][1]
+
+    # 3) owner 可设置任意成员
+    owner = FakeEvent("feishu::u1", role="member")
+    await star._cmd_alias(owner, "fam qq::u2 小Q")
+    assert config["aliases"]["fam"]["qq::u2"] == "小Q", config["aliases"]
+
+    # 4) 删除
+    owner2 = FakeEvent("feishu::u1", role="member")
+    await star._cmd_alias(owner2, "qq::u2 -")
+    assert "qq::u2" not in config["aliases"]["fam"]
+
+    # 5) 查看
+    viewer = FakeEvent("qq::u2", role="member")
+    await star._cmd_alias(viewer, "")
+    assert "成员昵称" in viewer.replies[0][1], viewer.replies[0][1]
+
+    # 6) 成员不在组内 → 拒绝
+    bad = FakeEvent("feishu::u1", role="member")
+    await star._cmd_alias(bad, "fam telegram::x 外人")
+    assert "不在组" in bad.replies[0][1], bad.replies[0][1]
+
+    print("PASS alias set + permission + view")
+
+
+
+async def test_record_message_dedup_and_filter(tmp):
+    """消息流水：同文本窗口内去重；/shared 命令不记；/ 命令按 skip_commands 过滤。"""
+    cm = await make_cm(tmp)
+    groups = [{
+        "name": "fam", "id": "g-aaaaaaaa",
+        "umos": ["feishu::u1", "qq::u2"], "owner": "feishu::u1",
+    }]
+    config = {"user_groups": groups, "merged": {"fam": "g-aaaaaaaa"}}
+    star = CircleMemoryStar(None, config)
+    star.context = SimpleNamespace(conversation_manager=cm)
+
+    from circle_memory_core import commands as commands_mod
+    recorded = []
+    orig_append = commands_mod.append_message_log
+    commands_mod.append_message_log = lambda *a, **k: recorded.append(a)
+    try:
+        # 同文本两次（窗口内）→ 只记一次
+        e1 = FakeEvent("feishu::u1", message_str="你好呀")
+        e2 = FakeEvent("feishu::u1", message_str="你好呀")
+        star.handlers.record_message(e1)
+        star.handlers.record_message(e2)
+        assert len(recorded) == 1, f"去重失败: {len(recorded)}"
+
+        # 不同文本 → 记
+        star.handlers.record_message(FakeEvent("feishu::u1", message_str="第二句"))
+        assert len(recorded) == 2
+
+        # /shared 命令 → 不记
+        star.handlers.record_message(FakeEvent("feishu::u1", message_str="/shared id"))
+        # 其他 / 命令（默认跳过）→ 不记
+        star.handlers.record_message(FakeEvent("feishu::u1", message_str="/help"))
+        assert len(recorded) == 2, f"命令过滤失败: {len(recorded)}"
+
+        # skip_commands=false → / 命令记录
+        config["skip_commands"] = False
+        star.handlers.record_message(FakeEvent("feishu::u1", message_str="/help"))
+        assert len(recorded) == 3
+
+        # 组外会话 → 不记
+        star.handlers.record_message(FakeEvent("telegram::x", message_str="外面的话"))
+        assert len(recorded) == 3, f"组外不应记录: {len(recorded)}"
+    finally:
+        commands_mod.append_message_log = orig_append
+
+    print("PASS message log dedup + command filter")
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as td:
         tmp = type("Tmp", (), {"__truediv__": lambda self, x: os.path.join(td, x)})()
@@ -461,4 +555,6 @@ if __name__ == "__main__":
         asyncio.run(test_create_records_owner(tmp))
         asyncio.run(test_remove_permission_and_flow(tmp))
         asyncio.run(test_leave_last_member_dissolves_group(tmp))
+        asyncio.run(test_alias_set_and_permission(tmp))
+        asyncio.run(test_record_message_dedup_and_filter(tmp))
     print("OK: 集成测试全部通过")

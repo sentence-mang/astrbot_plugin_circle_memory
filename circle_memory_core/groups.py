@@ -157,3 +157,27 @@ def resolve_remove_target(arg: str, user_groups: list, umo: str) -> tuple[str, s
             return group_name, target_umo
         return None
     return None
+
+
+def resolve_alias_target(arg: str, user_groups: list, umo: str) -> tuple[str, str, str] | None:
+    """解析 /shared alias 参数 → (组名, 目标成员 UMO, 昵称)。
+
+    形式：
+    - 省略组名：`alias <成员UMO> <昵称>`（当前会话必须已在某组）
+    - 显式组名：`alias <组名> <成员UMO> <昵称>`
+    仅 0-1 个词（查看模式）或无法解析时返回 None（调用方处理查看/报错）。
+    """
+    parts = [p for p in (arg or "").split()]
+    if len(parts) < 2:
+        return None  # 查看模式
+    if len(parts) == 2:
+        target_umo, nick = parts
+        group_name = group_for_umo(user_groups, umo)
+        if not group_name:
+            return None
+        return group_name, target_umo, nick
+    if len(parts) == 3:
+        group_name, target_umo, nick = parts
+        if group_name in [g.get("name") for g in user_groups]:
+            return group_name, target_umo, nick
+    return None

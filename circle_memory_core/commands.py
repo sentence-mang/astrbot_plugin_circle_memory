@@ -5,7 +5,9 @@ codes（CodeManager）、sessions（SharedSessionManager）。
 """
 
 import datetime
+import hashlib
 import logging
+import time
 
 from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
@@ -14,6 +16,7 @@ from astrbot.core.platform.message_session import MessageSession
 from circle_memory_core.constants import (
     EXIT_DATA_POLICY_DEFAULT,
     KNOWN_COMMANDS,
+    MAX_ALIAS_LEN,
     MAX_GROUP_NAME_LEN,
     USAGE_TEXT,
 )
@@ -23,6 +26,7 @@ from circle_memory_core.groups import (
     group_for_umo,
     list_group_views,
     normalize_groups,
+    resolve_alias_target,
     resolve_remove_target,
     resolve_target_group,
     transfer_ownership,
@@ -32,6 +36,7 @@ from circle_memory_core.storage import (
     append_message_log,
     find_group,
     read_message_log,
+    save_aliases,
     save_user_groups,
     write_group_archive,
     write_personal_archive,
@@ -41,15 +46,21 @@ logger = logging.getLogger(__name__)
 
 
 class CommandHandlers:
+    # 消息去重时间窗（秒）：同会话同文本在窗口内只记录一次，防事件重复触发双写
+    DEDUP_TTL = 180
+    # 去重缓存上限（每组），超过后清理过期项
+    DEDUP_CACHE_MAX = 500
+
     def __init__(self, star, codes, sessions) -> None:
         self.star = star
         self.codes = codes
         self.sessions = sessions
+        self._msg_dedup: dict[str, dict[str, float]] = {}  # group -> {指纹: 时间戳}
 
     # ---------- 消息流水（mine_only 数据源；best-effort） ----------
 
     def record_message(self, event) -> None:
-        """记录组内成员消息到流水（跳过 /shared 命令）。异常不影响主流程。"""
+        """记录组内成员消息到流水（跳过命令消息；同文本窗口内去重）。异常不影响主流程。"""
         try:
             if not self.star.config.get("enabled", True):
                 return
@@ -60,9 +71,26 @@ class CommandHandlers:
             if group is None:
                 return
             text = event.message_str.strip()
-            if not text or text.startswith("/shared") or text.startswith("shared "):
+            if not text:
                 return
-            append_message_log(group, umo, event.get_sender_name(), text)
+            # 命令过滤：/shared 系列始终跳过；其他 / 开头命令按配置（默认跳过）
+            if text.startswith("/shared") or text.startswith("shared "):
+                return
+            if self.star.config.get("skip_commands", True) and text.startswith("/"):
+                return
+            # 指纹去重（防事件重复触发）
+            sender = event.get_sender_name() or ""
+            fp = hashlib.md5(f"{umo}|{sender}|{text}".encode("utf-8")).hexdigest()
+            now = time.time()
+            cache = self._msg_dedup.setdefault(group, {})
+            if len(cache) > self.DEDUP_CACHE_MAX:
+                for k in [k for k, v in cache.items() if now - v > self.DEDUP_TTL]:
+                    cache.pop(k, None)
+            last = cache.get(fp)
+            if last is not None and now - last < self.DEDUP_TTL:
+                return
+            cache[fp] = now
+            append_message_log(group, umo, sender, text)
         except Exception as e:
             logger.debug("[CircleMemory] 记录消息流水失败（忽略）: %s", e)
 
@@ -150,6 +178,8 @@ class CommandHandlers:
             await self.cmd_dissolve(event, arg)
         elif cmd == "remove":
             await self.cmd_remove(event, arg)
+        elif cmd == "alias":
+            await self.cmd_alias(event, arg)
         elif cmd == "code":
             await self.cmd_code(event, arg)
         elif cmd == "id":
@@ -536,3 +566,81 @@ class CommandHandlers:
             f"5 分钟内有效，把此码发给想加入的人，\n"
             f"让对方在对应平台发送 /shared join {name} {code}"
         ))
+
+    # ---------- 成员昵称（alias） ----------
+
+    async def cmd_alias(self, event, arg: str) -> None:
+        """设置/查看成员昵称。
+
+        语法：/shared alias [组名] [<成员会话ID> <昵称>]
+        - 无参数：查看当前组昵称
+        - 一个词：查看指定组昵称
+        - 省略组名：alias <成员UMO> <昵称>（组内）
+        - 显式组名：alias <组名> <成员UMO> <昵称>
+        - 昵称 "-"：删除该成员昵称
+        权限：成员可设置自己的昵称；组管理员（owner）可设置任意成员；平台管理员兜底。
+        """
+        umo = event.unified_msg_origin or ""
+        user_groups = list(self.star.config.get("user_groups", []))
+        parts = [p for p in (arg or "").split()]
+
+        # ---- 查看模式 ----
+        if len(parts) <= 1:
+            group_name = parts[0] if parts else group_for_umo(user_groups, umo)
+            if not group_name:
+                await event.send(event.plain_result(
+                    "用法: /shared alias [组名] <成员会话ID> <昵称>（- 删除；组内可省略组名）"
+                ))
+                return
+            target = find_group(self.star.config, group_name)
+            if target is None:
+                await event.send(event.plain_result(f"组「{group_name}」不存在"))
+                return
+            aliases = (self.star.config.get("aliases") or {}).get(group_name) or {}
+            lines = [f"组「{group_name}」成员昵称："]
+            for m in target.get("umos", []):
+                nick = aliases.get(m)
+                lines.append(f"  · {m} → {nick if nick else '（未设置）'}")
+            await event.send(event.plain_result("\n".join(lines)))
+            return
+
+        # ---- 设置/删除模式 ----
+        parsed = resolve_alias_target(arg, user_groups, umo)
+        if parsed is None:
+            await event.send(event.plain_result(
+                "用法: /shared alias [组名] <成员会话ID> <昵称>（- 删除；组内可省略组名）"
+            ))
+            return
+        group_name, target_umo, nick = parsed
+        target = find_group(self.star.config, group_name)
+        if target is None:
+            await event.send(event.plain_result(f"组「{group_name}」不存在"))
+            return
+        if target_umo not in target.get("umos", []):
+            await event.send(event.plain_result(f"会话 {target_umo} 不在组「{group_name}」中"))
+            return
+        # 权限：本人可设自己；owner 可设任意成员；平台管理员兜底
+        is_admin = getattr(event, "role", "") == "admin"
+        if target_umo != umo and umo != target.get("owner") and not is_admin:
+            await event.send(event.plain_result(
+                "只能设置自己的昵称，或由组管理员（创建者）设置任意成员"
+            ))
+            return
+        if nick != "-":
+            if len(nick) > MAX_ALIAS_LEN or any(ord(c) < 32 for c in nick):
+                await event.send(event.plain_result(
+                    f"昵称不合法：需为 1-{MAX_ALIAS_LEN} 个可见字符，且不含换行/控制字符"
+                ))
+                return
+
+        aliases = dict((self.star.config.get("aliases") or {}).get(group_name) or {})
+        if nick == "-":
+            aliases.pop(target_umo, None)
+            msg = f"已删除 {target_umo} 的昵称"
+        else:
+            aliases[target_umo] = nick
+            msg = f"已设置 {target_umo} 的昵称为「{nick}」"
+        all_aliases = dict(self.star.config.get("aliases") or {})
+        all_aliases[group_name] = aliases
+        save_aliases(self.star.config, all_aliases)
+        await event.send(event.plain_result(msg))

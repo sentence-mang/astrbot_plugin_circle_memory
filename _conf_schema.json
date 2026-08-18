@@ -14,6 +14,37 @@
     "type": "int",
     "default": 10
   },
+  "media_mode": {
+    "description": "共享会话历史中图片的处理策略：ignore=移除图片；placeholder=替换为[图片]占位（默认）；caption=调用 LLM 转述图片内容（消耗 token）",
+    "type": "string",
+    "default": "placeholder"
+  },
+  "caption_provider_id": {
+    "description": "图片转述专用 provider ID（留空=使用当前会话 provider）",
+    "type": "string",
+    "default": ""
+  },
+  "history_budget": {
+    "description": "共享历史字符预算上限（0=不限制；超限时折叠：最近消息全量+头部摘要+中段省略）",
+    "type": "int",
+    "default": 0
+  },
+  "summary_enabled": {
+    "description": "折叠时是否调用 LLM 生成历史摘要（消耗 token；关闭时用省略标记）",
+    "type": "bool",
+    "default": false
+  },
+  "summary_target_chars": {
+    "description": "历史摘要目标长度（字符）",
+    "type": "int",
+    "default": 800
+  },
+  "aliases": {
+    "description": "成员昵称映射（由 /shared alias 命令维护）",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
   "user_groups": {
     "description": "用户组（由 /shared 命令维护）",
     "type": "text",
@@ -25,5 +56,10 @@
     "type": "text",
     "default": "",
     "invisible": true
+  },
+  "skip_commands": {
+    "description": "记录消息流水时跳过 / 开头的命令消息（/shared 系列始终跳过）",
+    "type": "bool",
+    "default": true
   }
 }
