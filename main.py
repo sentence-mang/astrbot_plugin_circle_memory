@@ -40,7 +40,7 @@ from astrbot.api.web import error_response, json_response, request
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_NAME = "astrbot_plugin_shared_context"
+PLUGIN_NAME = "astrbot_plugin_circle_memory"
 
 CODE_TTL = 300  # 验证码有效期（秒）
 MAX_CODE_ATTEMPTS = 5  # 验证码最大尝试次数（防暴力枚举）
@@ -175,7 +175,7 @@ def transfer_ownership(group: dict) -> None:
     group["owner"] = members[0] if members else None
 
 
-class SharedContextStar(Star):
+class CircleMemoryStar(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
@@ -189,7 +189,7 @@ class SharedContextStar(Star):
                 self.config["user_groups"] = user_groups
                 self._save_user_groups(user_groups)
         except Exception as e:
-            logger.error("[SharedContext] 组 ID 规范化失败: %s", e)
+            logger.error("[CircleMemory] 组 ID 规范化失败: %s", e)
 
         # 迁移在 initialize()（激活时，事件循环内）与首次 LLM 请求（懒迁移）执行
 
@@ -198,7 +198,7 @@ class SharedContextStar(Star):
         try:
             await super().initialize()
         except Exception as e:
-            logger.debug("[SharedContext] 基类 initialize 异常（忽略）: %s", e)
+            logger.debug("[CircleMemory] 基类 initialize 异常（忽略）: %s", e)
         await self._migrate_all_groups()
 
     # ---------- 命令拦截（AdapterMessageEvent，早于 follow_up）----------
@@ -208,7 +208,7 @@ class SharedContextStar(Star):
         if not self.config.get("enabled", True):
             return
         text = event.message_str.strip()
-        logger.debug("[SharedContext] 收到消息: %s (umo=%s)", text[:40], event.unified_msg_origin)
+        logger.debug("[CircleMemory] 收到消息: %s (umo=%s)", text[:40], event.unified_msg_origin)
         # waking_check 已剥离 wake_prefix（/），所以同时接受 "shared" 与 "/shared"。
         # 只有真正命中已知命令才拦截；以 shared 开头的普通聊天一律放行。
         if not is_shared_command(text):
@@ -216,14 +216,14 @@ class SharedContextStar(Star):
         parts = text.lstrip("/").split(maxsplit=2)
         cmd = parts[1] if len(parts) > 1 else ""
         if cmd not in KNOWN_COMMANDS:
-            logger.debug("[SharedContext] 非命令的 shared 开头消息，放行: %s", text[:40])
+            logger.debug("[CircleMemory] 非命令的 shared 开头消息，放行: %s", text[:40])
             return
 
         # 处理命令并阻止后续流程（含 follow_up）
         try:
             await self._handle_command(event, text)
         except Exception as e:
-            logger.error("[SharedContext] 命令处理失败: %s", e, exc_info=True)
+            logger.error("[CircleMemory] 命令处理失败: %s", e, exc_info=True)
             await event.send(event.plain_result("命令执行出错，请重试"))
         event.stop_event()
 
@@ -352,7 +352,7 @@ class SharedContextStar(Star):
         try:
             await cm.new_conversation(umo)
         except Exception as e:
-            logger.error("[SharedContext] 重置会话失败，已取消退出: %s", e)
+            logger.error("[CircleMemory] 重置会话失败，已取消退出: %s", e)
             await event.send(event.plain_result("退出失败：会话重置出错，请重试"))
             return
 
@@ -480,7 +480,7 @@ class SharedContextStar(Star):
             try:
                 await cm.new_conversation(member)
             except Exception as e:
-                logger.error("[SharedContext] 重置会话 %s 失败，已取消解散: %s", member, e)
+                logger.error("[CircleMemory] 重置会话 %s 失败，已取消解散: %s", member, e)
                 await event.send(event.plain_result("解散失败：会话重置出错，请重试"))
                 return
 
@@ -536,9 +536,9 @@ class SharedContextStar(Star):
         try:
             # unified_msg_origin 传空字符串：conversation_id 非空时不触碰任何 UMO 的内存映射
             await cm.delete_conversation("", conversation_id=shared_cid)
-            logger.info("[SharedContext] 组 %s 共享会话 %s 已物理删除", group, shared_cid)
+            logger.info("[CircleMemory] 组 %s 共享会话 %s 已物理删除", group, shared_cid)
         except Exception as e:
-            logger.error("[SharedContext] 删除共享会话 %s 失败: %s", shared_cid, e)
+            logger.error("[CircleMemory] 删除共享会话 %s 失败: %s", shared_cid, e)
 
     def _verify_code(self, group_name: str, code: str) -> tuple[bool, str]:
         """校验组邀请码：未过期、未超限、匹配（任一失败即拒绝）。
@@ -572,7 +572,7 @@ class SharedContextStar(Star):
         try:
             await self._ensure_llm_shared(event)
         except Exception as e:
-            logger.error("[SharedContext] 请求前共享处理失败（已放行原流程）: %s", e, exc_info=True)
+            logger.error("[CircleMemory] 请求前共享处理失败（已放行原流程）: %s", e, exc_info=True)
 
     async def _ensure_llm_shared(self, event: AstrMessageEvent):
         if not self.config.get("enabled", True):
@@ -611,7 +611,7 @@ class SharedContextStar(Star):
         cid = await cm.get_curr_conversation_id(umo)
         if cid != gid:
             await cm.switch_conversation(umo, gid)
-            logger.info("[SharedContext] 会话 %s 已切到组 %s 共享会话 %s", umo, group, gid)
+            logger.info("[CircleMemory] 会话 %s 已切到组 %s 共享会话 %s", umo, group, gid)
 
     # ---------- 组共享会话管理（cid = 组 ID） ----------
 
@@ -623,7 +623,7 @@ class SharedContextStar(Star):
             if existing:
                 return gid
         except Exception as e:
-            logger.error("[SharedContext] 查询组会话 %s 失败: %s", gid, e)
+            logger.error("[CircleMemory] 查询组会话 %s 失败: %s", gid, e)
             return gid
 
         source = None
@@ -631,18 +631,18 @@ class SharedContextStar(Star):
             try:
                 source = await cm.db.get_conversation_by_id(cid=source_cid)
             except Exception as e:
-                logger.error("[SharedContext] 读取源会话 %s 失败: %s", source_cid, e)
+                logger.error("[CircleMemory] 读取源会话 %s 失败: %s", source_cid, e)
 
         try:
             await cm.db.create_conversation(
-                user_id=(source.user_id if source else "shared_context"),
+                user_id=(source.user_id if source else "circle_memory"),
                 platform_id=(source.platform_id if source else "unknown"),
                 content=(source.content or []) if source else [],
                 title=(source.title if source else group.get("name")),
                 persona_id=(source.persona_id if source else None),
                 cid=gid,
             )
-            logger.info("[SharedContext] 组 %s 共享会话已以组 id %s 创建", group.get("name"), gid)
+            logger.info("[CircleMemory] 组 %s 共享会话已以组 id %s 创建", group.get("name"), gid)
         except Exception as e:
             # 并发竞态下另一任务可能已创建成功（UNIQUE 约束）：视为幂等成功
             try:
@@ -651,16 +651,16 @@ class SharedContextStar(Star):
                     return gid
             except Exception:
                 pass
-            logger.error("[SharedContext] 创建组会话 %s 失败: %s", gid, e)
+            logger.error("[CircleMemory] 创建组会话 %s 失败: %s", gid, e)
             return gid
 
         # 继承完成后清理旧会话（失败仅记日志，下次加载幂等续迁）
         if source_cid and source is not None and source_cid != gid:
             try:
                 await cm.db.delete_conversation(cid=source_cid)
-                logger.info("[SharedContext] 旧共享会话 %s 已删除", source_cid)
+                logger.info("[CircleMemory] 旧共享会话 %s 已删除", source_cid)
             except Exception as e:
-                logger.error("[SharedContext] 删除旧会话 %s 失败（下次加载幂等续迁）: %s", source_cid, e)
+                logger.error("[CircleMemory] 删除旧会话 %s 失败（下次加载幂等续迁）: %s", source_cid, e)
         return gid
 
     async def _ensure_group_shared(self, group_name: str, umo: str):
@@ -674,11 +674,11 @@ class SharedContextStar(Star):
         merged = dict(self.config.get("merged", {}))
         group = self._find_group(group_name)
         if group is None:
-            logger.warning("[SharedContext] 组 %s 不存在于配置，跳过迁移", group_name)
+            logger.warning("[CircleMemory] 组 %s 不存在于配置，跳过迁移", group_name)
             return
         gid = group_cid(group)
         if not gid:
-            logger.warning("[SharedContext] 组 %s 缺少 id，跳过迁移（请检查配置）", group_name)
+            logger.warning("[CircleMemory] 组 %s 缺少 id，跳过迁移（请检查配置）", group_name)
             return
         old_cid = merged.get(group_name)
 
@@ -691,7 +691,7 @@ class SharedContextStar(Star):
             try:
                 source_cid = await cm.get_curr_conversation_id(umo) or None
             except Exception as e:
-                logger.error("[SharedContext] 读取当前会话失败: %s", e)
+                logger.error("[CircleMemory] 读取当前会话失败: %s", e)
                 source_cid = None
 
         await self._ensure_group_conversation(cm, group, source_cid)
@@ -705,16 +705,16 @@ class SharedContextStar(Star):
                 if not mc or mc != gid:
                     await cm.switch_conversation(m, gid)
             except Exception as e:
-                logger.error("[SharedContext] 成员 %s 切换会话失败: %s", m, e)
+                logger.error("[CircleMemory] 成员 %s 切换会话失败: %s", m, e)
 
         merged[group_name] = gid
         self.config["merged"] = merged
         try:
             if hasattr(self.config, "save_config"):
                 self.config.save_config()
-                logger.info("[SharedContext] 组 %s 共享会话已迁移为组 id %s", group_name, gid)
+                logger.info("[CircleMemory] 组 %s 共享会话已迁移为组 id %s", group_name, gid)
         except Exception as e:
-            logger.error("[SharedContext] 保存 merged 失败: %s", e)
+            logger.error("[CircleMemory] 保存 merged 失败: %s", e)
 
     async def _migrate_all_groups(self):
         """加载后扫描全部组并迁移（幂等；单组失败不阻塞其他组）。"""
@@ -725,9 +725,9 @@ class SharedContextStar(Star):
                 try:
                     await self._ensure_group_shared(group.get("name"), umos[0] if umos else "")
                 except Exception as e:
-                    logger.error("[SharedContext] 组 %s 迁移失败: %s", group.get("name"), e)
+                    logger.error("[CircleMemory] 组 %s 迁移失败: %s", group.get("name"), e)
         except Exception as e:
-            logger.error("[SharedContext] 全量迁移失败: %s", e)
+            logger.error("[CircleMemory] 全量迁移失败: %s", e)
 
     # ---------- 内部 ----------
 
@@ -743,6 +743,6 @@ class SharedContextStar(Star):
         try:
             if hasattr(self.config, "save_config"):
                 self.config.save_config()
-                logger.info("[SharedContext] 配置已保存")
+                logger.info("[CircleMemory] 配置已保存")
         except Exception as e:
-            logger.error("[SharedContext] 保存配置失败: %s", e)
+            logger.error("[CircleMemory] 保存配置失败: %s", e)

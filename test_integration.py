@@ -32,7 +32,7 @@ from astrbot.core.conversation_mgr import ConversationManager  # noqa: E402
 from astrbot.core.db.sqlite import SQLiteDatabase  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from main import SharedContextStar, group_cid  # noqa: E402
+from main import CircleMemoryStar, group_cid  # noqa: E402
 
 from types import SimpleNamespace  # noqa: E402
 
@@ -61,7 +61,7 @@ async def test_migration_and_group_id_readwrite(tmp):
         "user_groups": [{"name": "fam", "umos": ["feishu::u1", "qq::u2"]}],
         "merged": {"fam": OLD_CID},
     }
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
 
     # __init__ 规范化：旧组自动补 ID
@@ -123,7 +123,7 @@ async def test_new_group_adopts_member_history(tmp):
     await cm.switch_conversation("wechat::u9", own_cid)
 
     config = {"user_groups": [{"name": "new", "umos": ["wechat::u9"]}], "merged": {}}
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
     gid = group_cid(config["user_groups"][0])
 
@@ -154,7 +154,7 @@ async def test_concurrent_ensure_single_create(tmp):
         "user_groups": [{"name": "fam", "umos": ["feishu::u1", "qq::u2"]}],
         "merged": {"fam": OLD_CID},
     }
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
     gid = group_cid(config["user_groups"][0])
 
@@ -193,7 +193,7 @@ async def test_initialize_runs_migration(tmp):
         "user_groups": [{"name": "fam", "umos": ["feishu::u1", "qq::u2"]}],
         "merged": {"fam": OLD_CID},
     }
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
     gid = group_cid(config["user_groups"][0])
 
@@ -225,7 +225,7 @@ async def test_group_without_id_is_rejected_safely(tmp):
 
     # 手工配置的组没有 id（模拟 web UI 直接编辑且未经过 __init__ 规范化）
     config = {"user_groups": [{"name": "noid", "umos": ["feishu::u9"]}], "merged": {}}
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
     del config["user_groups"][0]["id"]  # __init__ 已补 id，删掉模拟外部编辑
 
@@ -265,7 +265,7 @@ async def test_command_permission_isolation(tmp):
         {"name": "work", "id": "g-bbbbbbbb", "umos": ["qq::u2"]},
     ]
     config = {"user_groups": groups, "merged": {"fam": "g-aaaaaaaa", "work": "g-bbbbbbbb"}}
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
 
     # --- list：组外普通会话只见组名，无 ID、无成员 ---
@@ -331,7 +331,7 @@ async def test_dissolve_requires_creator(tmp):
         "umos": ["feishu::u1", "qq::u2"], "owner": "feishu::u1",
     }]
     config = {"user_groups": groups, "merged": {"fam": "g-aaaaaaaa"}}
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
 
     # 非创建者成员 → 拒绝，组保留
@@ -356,7 +356,7 @@ async def test_owner_transfer_on_leave(tmp):
         "umos": ["feishu::u1", "qq::u2", "wechat::u3"], "owner": "feishu::u1",
     }]
     config = {"user_groups": groups, "merged": {"fam": "g-aaaaaaaa"}}
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
 
     creator = FakeEvent("feishu::u1", role="member")
@@ -376,7 +376,7 @@ async def test_create_records_owner(tmp):
     """创建组时记录创建者会话为组主（组管理员）。"""
     cm = await make_cm(tmp)
     config = {"user_groups": [], "merged": {}}
-    star = SharedContextStar(None, config)
+    star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
 
     creator = FakeEvent("feishu::u1", role="member")

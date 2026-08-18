@@ -1,12 +1,12 @@
-# astrbot_plugin_shared_context
+# astrbot_plugin_circle_memory
 
-跨平台共享上下文插件：将多个平台的多个会话组织为**会话组**，组内所有会话共享同一份对话历史。任何第三方插件均可通过组 ID 直接定位组共享会话，无需适配。
+跨平台共享上下文插件（circle_memory）：将多个平台的多个会话组织为**会话组**，组内所有会话共享同一份对话历史。任何第三方插件均可通过组 ID 直接定位组共享会话，无需适配。
 
 - **作者**: sentence-mang
 - **版本**: 1.1.3
 - **兼容性**: AstrBot >= 4.0.0
 - **许可证**: MIT
-- **仓库**: https://github.com/sentence-mang/astrbot_plugin_shared_context
+- **仓库**: https://github.com/sentence-mang/astrbot_plugin_circle_memory
 
 ---
 
@@ -118,7 +118,7 @@ await cm.add_message_pair(
 
 ## 7. 配置项
 
-配置文件：`data/config/astrbot_plugin_shared_context_config.json`（`user_groups` 与 `merged` 为内部字段，Web 面板隐藏，由命令维护，请勿手工编辑）。
+配置文件：`data/config/astrbot_plugin_circle_memory_config.json`（`user_groups` 与 `merged` 为内部字段，Web 面板隐藏，由命令维护，请勿手工编辑）。
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -159,7 +159,7 @@ await cm.add_message_pair(
 - 所有成员切换至组 ID 会话；旧 uuid 会话物理删除；
 - 迁移幂等、可重入：中断后下次加载自动续迁，重复执行不产生重复数据。
 
-迁移日志关键字：`[SharedContext] 组 %s 共享会话已迁移为组 id %s`。
+迁移日志关键字：`[CircleMemory] 组 %s 共享会话已迁移为组 id %s`。
 
 ## 11. 测试
 

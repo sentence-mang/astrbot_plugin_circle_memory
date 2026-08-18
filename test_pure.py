@@ -1,7 +1,7 @@
 """纯函数最小单测（无框架依赖）。
 
 运行（容器内）:
-    docker exec astrbot python3 data/plugins/astrbot_plugin_shared_context/test_pure.py
+    docker exec astrbot python3 data/plugins/astrbot_plugin_circle_memory/test_pure.py
 """
 
 import os
@@ -12,7 +12,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from main import (  # noqa: E402
     MAX_CODE_ATTEMPTS,
-    SharedContextStar,
+    CircleMemoryStar,
     _valid_group_name,
     can_query_group_id,
     generate_group_id,
@@ -52,7 +52,7 @@ def test_group_for_umo():
 
 
 def test_verify_code():
-    s = SharedContextStar(None, {})
+    s = CircleMemoryStar(None, {})
     # 无码
     assert not s._verify_code("g", "123456")[0]
     # 有效
@@ -142,7 +142,7 @@ def test_normalize_groups_dedups_conflicting_ids():
 
 def test_verify_code_attempt_limit_blocks_bruteforce():
     """邀请码 5 次失败即作废（防暴力枚举）。"""
-    s = SharedContextStar(None, {})
+    s = CircleMemoryStar(None, {})
     s._pending_codes["g"] = {"code": "123456", "expires": time.time() + 100, "attempts": 0}
     for i in range(MAX_CODE_ATTEMPTS):
         ok, msg = s._verify_code("g", "000000")
