@@ -66,6 +66,17 @@ def save_merged(config, merged: dict) -> None:
         logger.error("[CircleMemory] 保存 merged 失败: %s", e)
 
 
+def save_pins(config, pins: dict) -> None:
+    """保存组置顶（组名 → 置顶文本）。"""
+    config["pins"] = pins
+    try:
+        if hasattr(config, "save_config"):
+            config.save_config()
+            logger.info("[CircleMemory] pins 已保存")
+    except Exception as e:
+        logger.error("[CircleMemory] 保存 pins 失败: %s", e)
+
+
 def save_aliases(config, aliases: dict) -> None:
     """保存成员昵称映射（组名 → {UMO: 昵称}）。"""
     config["aliases"] = aliases

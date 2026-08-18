@@ -11,7 +11,7 @@ MAX_GROUP_NAME_LEN = 32  # 组名最大长度
 # 否则活跃 agent 续聊会先 stop_event()，我们的命令 handler 永远不会执行。
 PRIORITY = sys.maxsize + 1
 
-KNOWN_COMMANDS = frozenset({"create", "code", "join", "leave", "dissolve", "id", "list", "remove", "alias"})
+KNOWN_COMMANDS = frozenset({"create", "code", "join", "leave", "dissolve", "id", "list", "remove", "alias", "pin", "summary"})
 
 # 成员昵称最大长度
 MAX_ALIAS_LEN = 20
@@ -38,5 +38,7 @@ USAGE_TEXT = (
     "/shared id [组名]（管理员可查任意组）\n"
     "/shared list\n"
     "/shared remove [组名] <成员会话ID>（仅组管理员）\n"
-    "/shared alias [组名] [<成员会话ID> <昵称>]（昵称 - 删除；成员可设自己，组管理员可设任意成员）"
+    "/shared alias [组名] [<成员会话ID> <昵称>]（昵称 - 删除；成员可设自己，组管理员可设任意成员）\n"
+    "/shared pin [组名] <内容>（组管理员；- 清除置顶）\n"
+    "/shared summary [组名]（组管理员；生成共享历史摘要）"
 )

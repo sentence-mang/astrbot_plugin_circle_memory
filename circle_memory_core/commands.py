@@ -37,6 +37,7 @@ from circle_memory_core.storage import (
     find_group,
     read_message_log,
     save_aliases,
+    save_pins,
     save_user_groups,
     write_group_archive,
     write_personal_archive,
@@ -180,6 +181,10 @@ class CommandHandlers:
             await self.cmd_remove(event, arg)
         elif cmd == "alias":
             await self.cmd_alias(event, arg)
+        elif cmd == "pin":
+            await self.cmd_pin(event, arg)
+        elif cmd == "summary":
+            await self.cmd_summary(event, arg)
         elif cmd == "code":
             await self.cmd_code(event, arg)
         elif cmd == "id":
@@ -294,9 +299,21 @@ class CommandHandlers:
         self.star.config["merged"] = merged
 
     async def cmd_leave(self, event, name: str) -> None:
-        """退出组。组名可省略：省略时退出当前会话所在组。"""
+        """退出组。组名可省略；支持序号（按 /shared list 顺序）与 all（当前组）。"""
         umo = event.unified_msg_origin or ""
         user_groups = list(self.star.config.get("user_groups", []))
+        # 序号解析：/shared leave 1 → list 中第 1 个可见组
+        if name.isdigit():
+            is_admin = getattr(event, "role", "") == "admin"
+            views = list_group_views(user_groups, umo, is_admin)
+            idx = int(name) - 1
+            if 0 <= idx < len(views) and "id" in views[idx]:
+                name = views[idx]["name"]
+            else:
+                await event.send(event.plain_result(f"序号无效：可见组共 {len(views)} 个"))
+                return
+        elif name == "all":
+            name = ""  # 一个会话只属于一个组，all 等价于退出当前组
         target_name = resolve_target_group(name, user_groups, umo)
         if target_name is None:
             await event.send(event.plain_result("你不在任何会话组中，无需退出"))
@@ -500,10 +517,27 @@ class CommandHandlers:
     async def cmd_dissolve(self, event, name: str) -> None:
         """解散组。仅创建组的会话（组管理员）可操作；组名可省略：省略时取当前会话所在组。
 
+        需要二次确认：/shared dissolve [组名] 确认（防误触，历史归档后删除）。
         兼容兜底：若组缺少 owner（异常数据），平台管理员可代为解散。
         """
         umo = event.unified_msg_origin or ""
         user_groups = list(self.star.config.get("user_groups", []))
+        # 二次确认解析：从右侧切出「确认」标记
+        confirm = False
+        split = (name or "").rsplit(maxsplit=1)
+        if len(split) == 2 and split[1] in ("确认", "yes", "y"):
+            confirm = True
+            name = split[0]
+        elif (name or "").strip() in ("确认", "yes", "y"):
+            confirm = True
+            name = ""
+        if not confirm:
+            show = name or "（当前组）"
+            await event.send(event.plain_result(
+                f"解散将归档并删除组「{show}」的全部共享历史，且不可恢复。\n"
+                f"确认请发送：/shared dissolve {name} 确认"
+            ))
+            return
         target_name = resolve_target_group(name, user_groups, umo)
         if target_name is None:
             await event.send(event.plain_result("你不在任何会话组中，无可解散的组"))
@@ -644,3 +678,116 @@ class CommandHandlers:
         all_aliases[group_name] = aliases
         save_aliases(self.star.config, all_aliases)
         await event.send(event.plain_result(msg))
+
+    # ---------- 组置顶（pin，组管理员） ----------
+
+    async def cmd_pin(self, event, arg: str) -> None:
+        """设置/清除组置顶记忆（组管理员）。置顶内容每轮注入共享会话请求最前。
+
+        语法：/shared pin [组名] <内容>；内容为 - 时清除置顶。
+        """
+        umo = event.unified_msg_origin or ""
+        user_groups = list(self.star.config.get("user_groups", []))
+        parts = arg.split(maxsplit=1)
+        # 解析：一个词=当前组+内容；两个词且首词是组名=组名+内容
+        if len(parts) == 1:
+            group_name = group_for_umo(user_groups, umo)
+            content = parts[0]
+        elif len(parts) == 2 and parts[0] in [g.get("name") for g in user_groups]:
+            group_name, content = parts
+        elif len(parts) == 2:
+            group_name = group_for_umo(user_groups, umo)
+            content = arg
+        else:
+            group_name, content = None, ""
+        if not group_name:
+            await event.send(event.plain_result(
+                "用法: /shared pin [组名] <内容>（组管理员；- 清除置顶）"
+            ))
+            return
+        target = find_group(self.star.config, group_name)
+        if target is None:
+            await event.send(event.plain_result(f"组「{group_name}」不存在"))
+            return
+        # 权限：仅组管理员（owner）；平台管理员兜底
+        is_admin = getattr(event, "role", "") == "admin"
+        if umo != target.get("owner") and not is_admin:
+            await event.send(event.plain_result(
+                f"只有组管理员（创建者）可以设置置顶，你不是组「{group_name}」的管理员"
+            ))
+            return
+
+        pins = dict(self.star.config.get("pins") or {})
+        if content == "-":
+            pins.pop(group_name, None)
+            msg = f"已清除组「{group_name}」的置顶"
+        else:
+            if len(content) > 500 or any(ord(c) < 32 for c in content):
+                await event.send(event.plain_result("置顶内容不合法：需为 1-500 个可见字符"))
+                return
+            pins[group_name] = content
+            msg = f"已设置组「{group_name}」置顶（每轮共享会话请求都会带上）"
+        save_pins(self.star.config, pins)
+        await event.send(event.plain_result(msg))
+
+    # ---------- 组摘要（组管理员） ----------
+
+    async def cmd_summary(self, event, arg: str = "") -> None:
+        """生成组共享历史摘要（组管理员）。调用当前会话 provider，失败给出提示。"""
+        umo = event.unified_msg_origin or ""
+        user_groups = list(self.star.config.get("user_groups", []))
+        group_name = resolve_target_group(arg, user_groups, umo)
+        if not group_name:
+            await event.send(event.plain_result("你不在任何会话组中，无可摘要的组"))
+            return
+        target = find_group(self.star.config, group_name)
+        if target is None:
+            await event.send(event.plain_result(f"组「{group_name}」不存在"))
+            return
+        if umo not in target.get("umos", []):
+            await event.send(event.plain_result(f"你不在组「{group_name}」中，无权生成摘要"))
+            return
+        # 权限：仅组管理员（owner）；平台管理员兜底
+        is_admin = getattr(event, "role", "") == "admin"
+        if umo != target.get("owner") and not is_admin:
+            await event.send(event.plain_result(
+                f"只有组管理员（创建者）可以生成摘要，你不是组「{group_name}」的管理员"
+            ))
+            return
+
+        content = await self.sessions.get_group_content(group_name)
+        if not content:
+            await event.send(event.plain_result(f"组「{group_name}」暂无共享历史"))
+            return
+        try:
+            provider = self.star.context.get_using_provider()
+            if not provider:
+                await event.send(event.plain_result("当前没有可用的 LLM provider，无法生成摘要"))
+                return
+            texts = []
+            for c in content:
+                ct = c.get("content", "")
+                if isinstance(ct, str) and ct:
+                    texts.append(ct)
+                elif isinstance(ct, list):
+                    texts.append("".join(
+                        p.get("text", "") for p in ct if isinstance(p, dict) and p.get("type") == "text"
+                    ))
+            sample = "\n".join(texts)[-6000:]
+            resp = await provider.text_chat(
+                prompt=(
+                    f"以下是共享会话组「{group_name}」的历史消息，请用中文生成一份不超过 "
+                    "600 字的会话摘要（要点式，覆盖主要话题与结论）：\n\n" + sample
+                ),
+                persist=False,
+            )
+            summary = (getattr(resp, "completion_text", "") or "").strip()
+            if not summary:
+                await event.send(event.plain_result("摘要生成失败：模型返回为空"))
+                return
+            await event.send(event.plain_result(
+                f"组「{group_name}」会话摘要（{len(content)} 条消息）：\n\n{summary}"
+            ))
+        except Exception as e:
+            logger.error("[CircleMemory] 生成组摘要失败: %s", e)
+            await event.send(event.plain_result("摘要生成失败，请稍后重试"))

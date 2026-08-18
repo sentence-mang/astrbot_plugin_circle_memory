@@ -320,9 +320,12 @@ async def test_command_permission_isolation(tmp):
     # 成员已从组中移除
     assert "feishu::u1" not in config["user_groups"][0]["umos"]
 
-    # --- dissolve 无参：组内成员直接解散当前所在组 ---
+    # --- dissolve 无参：组内成员直接解散当前所在组（需确认） ---
     dissolver = FakeEvent("qq::u2", role="member")
     await star._cmd_dissolve(dissolver, "")
+    assert "work" in [g["name"] for g in config["user_groups"]], "未确认不应解散"
+    assert "确认" in dissolver.replies[0][1], dissolver.replies[0][1]
+    await star._cmd_dissolve(dissolver, "确认")
     assert "work" not in [g["name"] for g in config["user_groups"]]
 
     print("PASS command permission isolation + optional group name")
@@ -339,15 +342,20 @@ async def test_dissolve_requires_creator(tmp):
     star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
 
-    # 非创建者成员 → 拒绝，组保留
+    # 未确认 → 组保留
+    member0 = FakeEvent("qq::u2", role="member")
+    await star._cmd_dissolve(member0, "")
+    assert any(g["name"] == "fam" for g in config["user_groups"]), "未确认不应解散"
+
+    # 非创建者成员（已确认）→ 拒绝，组保留
     member = FakeEvent("qq::u2", role="member")
-    await star._cmd_dissolve(member, "")
+    await star._cmd_dissolve(member, "确认")
     assert "创建" in member.replies[0][1], member.replies[0][1]
     assert any(g["name"] == "fam" for g in config["user_groups"]), "非创建者不应能解散"
 
-    # 创建者 → 成功解散
+    # 创建者（已确认）→ 成功解散
     creator = FakeEvent("feishu::u1", role="member")
-    await star._cmd_dissolve(creator, "")
+    await star._cmd_dissolve(creator, "确认")
     assert not any(g["name"] == "fam" for g in config["user_groups"]), "创建者应能解散"
 
     print("PASS dissolve requires creator (owner)")
@@ -369,9 +377,9 @@ async def test_owner_transfer_on_leave(tmp):
     g = config["user_groups"][0]
     assert g["owner"] == "qq::u2", f"owner 应移交剩余第一成员，实际 {g['owner']}"
 
-    # 新组主可解散
+    # 新组主可解散（需确认）
     new_owner = FakeEvent("qq::u2", role="member")
-    await star._cmd_dissolve(new_owner, "")
+    await star._cmd_dissolve(new_owner, "确认")
     assert not any(g["name"] == "fam" for g in config["user_groups"])
 
     print("PASS owner transfers to first remaining member on leave")
@@ -541,6 +549,48 @@ async def test_record_message_dedup_and_filter(tmp):
 
     print("PASS message log dedup + command filter")
 
+
+
+async def test_pin_and_summary_permissions(tmp):
+    """pin/summary：仅组管理员可操作；pin 内容持久化；非管理员拒绝。"""
+    cm = await make_cm(tmp)
+    groups = [{
+        "name": "fam", "id": "g-aaaaaaaa",
+        "umos": ["feishu::u1", "qq::u2"], "owner": "feishu::u1",
+    }]
+    config = {"user_groups": groups, "merged": {"fam": "g-aaaaaaaa"}}
+    star = CircleMemoryStar(None, config)
+    star.context = SimpleNamespace(conversation_manager=cm)
+
+    # 1) 非 owner 设置 pin → 拒绝
+    member = FakeEvent("qq::u2", role="member")
+    await star._cmd_pin(member, "fam 置顶内容")
+    assert "管理员" in member.replies[0][1], member.replies[0][1]
+    assert "pins" not in config or not config.get("pins"), "非 owner 不应能设置 pin"
+
+    # 2) owner 设置 pin → 持久化
+    owner = FakeEvent("feishu::u1", role="member")
+    await star._cmd_pin(owner, "fam 组内规矩")
+    assert config["pins"]["fam"] == "组内规矩", config["pins"]
+
+    # 3) owner 清除 pin
+    owner2 = FakeEvent("feishu::u1", role="member")
+    await star._cmd_pin(owner2, "fam -")
+    assert "fam" not in config.get("pins", {}), config.get("pins")
+
+    # 4) 非 owner 生成摘要 → 拒绝
+    member2 = FakeEvent("qq::u2", role="member")
+    await star._cmd_summary(member2, "")
+    assert "管理员" in member2.replies[0][1] or "无权" in member2.replies[0][1], member2.replies[0][1]
+
+    # 5) owner 摘要（无 provider → 明确失败提示，不崩）
+    owner3 = FakeEvent("feishu::u1", role="member")
+    await star._cmd_summary(owner3, "")
+    assert owner3.replies, "应有回复"
+    assert any(k in owner3.replies[-1][1] for k in ("暂无", "provider", "失败", "没有")), owner3.replies[-1][1]
+
+    print("PASS pin + summary permissions")
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as td:
         tmp = type("Tmp", (), {"__truediv__": lambda self, x: os.path.join(td, x)})()
@@ -557,4 +607,5 @@ if __name__ == "__main__":
         asyncio.run(test_leave_last_member_dissolves_group(tmp))
         asyncio.run(test_alias_set_and_permission(tmp))
         asyncio.run(test_record_message_dedup_and_filter(tmp))
+        asyncio.run(test_pin_and_summary_permissions(tmp))
     print("OK: 集成测试全部通过")

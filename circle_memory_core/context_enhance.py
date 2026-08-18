@@ -57,14 +57,30 @@ class ContextEnhancer:
         mode = self._cfg("media_mode", "placeholder")
         if mode not in ("ignore", "placeholder", "caption"):
             return
+        # 图片轮数控制：image_window>0 时仅保留最近 N 条 user 消息中的图片，
+        # 更早的图片一律转 [图片] 占位（省 token）
+        image_window = int(self._cfg("image_window", 0) or 0)
+        user_count = 0
+        for ctx in req.contexts:
+            if ctx.get("role") == "user":
+                user_count += 1
+        keep_from = user_count - image_window if image_window > 0 else -1
+        user_seen = 0
         for ctx in req.contexts:
             content = ctx.get("content")
             if not isinstance(content, list):
                 continue
+            if ctx.get("role") == "user":
+                user_seen += 1
+            is_recent_img = user_seen >= keep_from if image_window > 0 else True
             new_parts = []
             for item in content:
                 if not isinstance(item, dict) or item.get("type") != "image_url":
                     new_parts.append(item)
+                    continue
+                # 轮数窗口内的图片按 media_mode 处理；窗口外一律占位
+                if not is_recent_img:
+                    new_parts.append(self._text_part("[图片]"))
                     continue
                 if mode == "ignore":
                     continue
@@ -85,7 +101,7 @@ class ContextEnhancer:
                 else:
                     new_parts.append(self._text_part("[图片]"))
             ctx["content"] = new_parts
-        # 顶层图片列表同样处理
+        # 顶层图片列表：窗口外（image_window 无法定位所属轮次）统一按 mode 处理
         if mode == "ignore":
             req.image_urls = []
         elif mode == "placeholder":
@@ -127,13 +143,18 @@ class ContextEnhancer:
         members = group.get("umos", [])
         if not members:
             return
+        # 组置顶记忆（pin）置于最前
+        pins = (self.star.config.get("pins") or {}).get(group_name) or ""
+        head = ""
+        if pins:
+            head = f"【组置顶】{pins}\n\n"
         lines = ["共享会话成员身份（发言时用昵称称呼对方）："]
         for m in members:
             nick = aliases.get(m) or ""
             platform = m.split(":", 1)[0] if ":" in m else m
             who = f"{nick}（{platform}）" if nick else platform
             lines.append(f"- {who}")
-        block = "\n".join(lines)
+        block = head + "\n".join(lines)
         # 单次注入：system_prompt 每轮重建，不进历史，无累积
         if block not in req.system_prompt:
             req.system_prompt = (req.system_prompt.rstrip() + "\n\n" + block).strip()

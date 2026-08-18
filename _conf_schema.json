@@ -61,5 +61,16 @@
     "description": "记录消息流水时跳过 / 开头的命令消息（/shared 系列始终跳过）",
     "type": "bool",
     "default": true
+  },
+  "image_window": {
+    "description": "图片轮数控制：仅保留最近 N 条用户消息中的图片（0=全部按 media_mode 处理），更早的图片转 [图片] 占位（省 token）",
+    "type": "int",
+    "default": 0
+  },
+  "pins": {
+    "description": "组置顶记忆（由 /shared pin 命令维护）",
+    "type": "text",
+    "default": "",
+    "invisible": true
   }
 }

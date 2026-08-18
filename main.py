@@ -187,6 +187,12 @@ class CircleMemoryStar(Star):
     async def _cmd_alias(self, event, arg: str = ""):
         return await self.handlers.cmd_alias(event, arg)
 
+    async def _cmd_pin(self, event, arg: str = ""):
+        return await self.handlers.cmd_pin(event, arg)
+
+    async def _cmd_summary(self, event, arg: str = ""):
+        return await self.handlers.cmd_summary(event, arg)
+
     async def _cmd_list(self, event):
         return await self.handlers.cmd_list(event)
 
