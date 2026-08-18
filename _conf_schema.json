@@ -1,0 +1,30 @@
+{
+  "enabled": {
+    "description": "启用插件",
+    "type": "bool",
+    "default": true
+  },
+  "exit_data_policy": {
+    "description": "退出/被踢成员的数据处理策略：discard=会话重置无副本（默认）；mine_only=额外导出该成员自己的发言（服务器留档+尽力私聊发送）",
+    "type": "select",
+    "default": "discard",
+    "options": ["discard", "mine_only"]
+  },
+  "archive_keep": {
+    "description": "解散/末人退出归档保留份数（超过自动清理最旧）",
+    "type": "int",
+    "default": 10
+  },
+  "user_groups": {
+    "description": "用户组（由 /shared 命令维护）",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
+  "merged": {
+    "description": "组共享会话映射（由插件自动维护）",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  }
+}

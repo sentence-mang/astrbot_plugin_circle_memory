@@ -65,6 +65,7 @@ from circle_memory_core.groups import (
     is_shared_command,
     list_group_views,
     normalize_groups,
+    resolve_remove_target,
     resolve_target_group,
     transfer_ownership,
     umo_match,
@@ -88,6 +89,7 @@ __all__ = [
     "generate_group_id",
     "normalize_groups",
     "group_cid",
+    "resolve_remove_target",
     "resolve_target_group",
     "list_group_views",
     "can_query_group_id",
@@ -136,6 +138,8 @@ class CircleMemoryStar(Star):
         # waking_check 已剥离 wake_prefix（/），所以同时接受 "shared" 与 "/shared"。
         # 只有真正命中已知命令才拦截；以 shared 开头的普通聊天一律放行。
         if not is_shared_command(text):
+            # 非命令消息：记录组内消息流水（mine_only 数据源，best-effort）
+            self.handlers.record_message(event)
             return
         parts = text.lstrip("/").split(maxsplit=2)
         cmd = parts[1] if len(parts) > 1 else ""
@@ -172,6 +176,9 @@ class CircleMemoryStar(Star):
 
     async def _cmd_leave(self, event, name: str):
         return await self.handlers.cmd_leave(event, name)
+
+    async def _cmd_remove(self, event, arg: str):
+        return await self.handlers.cmd_remove(event, arg)
 
     async def _cmd_list(self, event):
         return await self.handlers.cmd_list(event)

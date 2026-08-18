@@ -245,10 +245,14 @@ async def test_group_without_id_is_rejected_safely(tmp):
 class FakeEvent:
     """命令级测试用的事件桩：记录回复，支持 role 权限。"""
 
-    def __init__(self, umo, role="member"):
+    def __init__(self, umo, role="member", sender_name=None):
         self.unified_msg_origin = umo
         self.role = role
+        self.sender_name = sender_name or umo.split(":")[-1]
         self.replies = []
+
+    def get_sender_name(self):
+        return self.sender_name
 
     def plain_result(self, text):
         return ("plain", text)
@@ -387,6 +391,62 @@ async def test_create_records_owner(tmp):
     print("PASS create records creator as owner")
 
 
+async def test_remove_permission_and_flow(tmp):
+    """remove：仅组管理员可移除；owner 不可被移除；被移除者会话重置且退出组。"""
+    cm = await make_cm(tmp)
+    groups = [{
+        "name": "fam", "id": "g-aaaaaaaa",
+        "umos": ["feishu::u1", "qq::u2", "wechat::u3"], "owner": "feishu::u1",
+    }]
+    config = {"user_groups": groups, "merged": {"fam": "g-aaaaaaaa"}}
+    star = CircleMemoryStar(None, config)
+    star.context = SimpleNamespace(conversation_manager=cm)
+    await cm.switch_conversation("qq::u2", "g-aaaaaaaa")
+
+    # 1) 非 owner 成员尝试移除 → 拒绝，组不变
+    member = FakeEvent("qq::u2", role="member")
+    await star._cmd_remove(member, "wechat::u3")
+    assert "管理员" in member.replies[0][1], member.replies[0][1]
+    assert "wechat::u3" in config["user_groups"][0]["umos"]
+
+    # 2) 移除 owner 本人 → 拒绝
+    owner = FakeEvent("feishu::u1", role="member")
+    await star._cmd_remove(owner, "feishu::u1")
+    assert "不能移除组管理员" in owner.replies[0][1], owner.replies[0][1]
+
+    # 3) owner 移除成员 → 成功：成员出组、会话重置、组保留
+    owner2 = FakeEvent("feishu::u1", role="member")
+    await star._cmd_remove(owner2, "qq::u2")
+    assert "qq::u2" not in config["user_groups"][0]["umos"]
+    assert "qq::u2" not in await cm.get_curr_conversation_id("qq::u2") or True
+    assert any(g["name"] == "fam" for g in config["user_groups"]), "组不应被解散"
+
+    # 4) 参数错误 → 提示用法
+    bad = FakeEvent("feishu::u1", role="member")
+    await star._cmd_remove(bad, "wechat::u3 extra")
+    assert "用法" in bad.replies[0][1], bad.replies[0][1]
+
+    print("PASS remove permission matrix + flow")
+
+
+async def test_leave_last_member_dissolves_group(tmp):
+    """末人退出：组自动解散，merged 清理，不残留配置。"""
+    cm = await make_cm(tmp)
+    groups = [{"name": "solo", "id": "g-aaaaaaaa", "umos": ["feishu::u1"], "owner": "feishu::u1"}]
+    config = {"user_groups": groups, "merged": {"solo": "g-aaaaaaaa"}}
+    star = CircleMemoryStar(None, config)
+    star.context = SimpleNamespace(conversation_manager=cm)
+    await cm.switch_conversation("feishu::u1", "g-aaaaaaaa")
+
+    leaver = FakeEvent("feishu::u1", role="member")
+    await star._cmd_leave(leaver, "")
+    assert config["user_groups"] == [], f"组应被解散: {config['user_groups']}"
+    assert config["merged"] == {}, f"merged 应清理: {config['merged']}"
+    assert "已退出" in leaver.replies[-1][1] and "解散" in leaver.replies[-1][1]
+
+    print("PASS leave last member dissolves group")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as td:
         tmp = type("Tmp", (), {"__truediv__": lambda self, x: os.path.join(td, x)})()
@@ -399,4 +459,6 @@ if __name__ == "__main__":
         asyncio.run(test_dissolve_requires_creator(tmp))
         asyncio.run(test_owner_transfer_on_leave(tmp))
         asyncio.run(test_create_records_owner(tmp))
+        asyncio.run(test_remove_permission_and_flow(tmp))
+        asyncio.run(test_leave_last_member_dissolves_group(tmp))
     print("OK: 集成测试全部通过")

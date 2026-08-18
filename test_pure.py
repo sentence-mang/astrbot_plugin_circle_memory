@@ -243,6 +243,60 @@ def test_transfer_ownership_after_leave():
     assert g2["owner"] is None, "无剩余成员时 owner 置空"
 
 
+def test_resolve_remove_target():
+    """remove 参数解析：省略组名/显式组名/组外拒绝。"""
+    from main import resolve_remove_target  # noqa: F401
+    groups = [{"name": "fam", "umos": ["feishu::u1", "qq::u2"], "owner": "feishu::u1"}]
+    # 组内省略组名：唯一参数为成员 UMO
+    assert resolve_remove_target("qq::u2", groups, "feishu::u1") == ("fam", "qq::u2")
+    # 显式组名 + 成员
+    assert resolve_remove_target("fam qq::u2", groups, "feishu::u1") == ("fam", "qq::u2")
+    # 组外省略组名（当前会话不在任何组）→ None
+    assert resolve_remove_target("qq::u2", groups, "telegram::x") is None
+    # 未知组名 → None
+    assert resolve_remove_target("nope qq::u2", groups, "feishu::u1") is None
+    # 空参数 → None
+    assert resolve_remove_target("", groups, "feishu::u1") is None
+    # 三个词 → None
+    assert resolve_remove_target("a b c", groups, "feishu::u1") is None
+
+
+def test_archive_roundtrip_and_cleanup():
+    """归档写入/读取/保留策略（临时目录）。"""
+    import tempfile
+
+    from circle_memory_core import storage as storage_mod
+
+    td = tempfile.mkdtemp()
+    storage_mod.get_plugin_data_dir = lambda: __import__("pathlib").Path(td)
+
+    # 消息流水
+    storage_mod.append_message_log("fam", "feishu::u1", "小飞", "第一条")
+    storage_mod.append_message_log("fam", "qq::u2", "小Q", "第二条")
+    storage_mod.append_message_log("fam", "feishu::u1", "小飞", "第三条")
+    mine = storage_mod.read_message_log("fam", "feishu::u1")
+    assert len(mine) == 2 and all(r["umo"] == "feishu::u1" for r in mine), mine
+    all_rec = storage_mod.read_message_log("fam")
+    assert len(all_rec) == 3
+
+    # 组归档
+    p1 = storage_mod.write_group_archive("fam", "g-1", ["a", "b"], [{"role": "user", "content": "hi"}], "解散")
+    assert p1 and p1.exists()
+    p2 = storage_mod.write_group_archive("fam", "g-1", ["a", "b"], [], "解散")
+    assert p2 and p2.exists()
+
+    # 保留策略：keep=1 时只留最新一份
+    storage_mod.cleanup_archives(keep=1)
+    files = list((__import__("pathlib").Path(td) / "archive" / "groups").glob("*.json"))
+    assert len(files) == 1, f"保留策略失败: {len(files)}"
+
+    # 个人归档
+    pp = storage_mod.write_personal_archive("fam", "feishu::u1", "小飞", mine)
+    assert pp and pp.exists()
+
+    print("PASS archive roundtrip + cleanup + personal export")
+
+
 if __name__ == "__main__":
     test_umo_match()
     test_group_for_umo()
@@ -259,4 +313,6 @@ if __name__ == "__main__":
     test_can_query_group_id_permissions()
     test_normalize_groups_assigns_owner()
     test_transfer_ownership_after_leave()
+    test_resolve_remove_target()
+    test_archive_roundtrip_and_cleanup()
     print("OK: 全部断言通过")

@@ -1,23 +1,41 @@
 """/shared 命令处理器。
 
-依赖注入：config（插件配置）、context（AstrBot Star context）、
+依赖注入：star（CircleMemoryStar，动态取 config/context）、
 codes（CodeManager）、sessions（SharedSessionManager）。
 """
 
+import datetime
 import logging
 
-from circle_memory_core.constants import KNOWN_COMMANDS, MAX_GROUP_NAME_LEN, USAGE_TEXT
+from astrbot.core.message.components import Plain
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.platform.message_session import MessageSession
+
+from circle_memory_core.constants import (
+    EXIT_DATA_POLICY_DEFAULT,
+    KNOWN_COMMANDS,
+    MAX_GROUP_NAME_LEN,
+    USAGE_TEXT,
+)
 from circle_memory_core.groups import (
     can_query_group_id,
     group_cid,
     group_for_umo,
     list_group_views,
     normalize_groups,
+    resolve_remove_target,
     resolve_target_group,
     transfer_ownership,
     valid_group_name,
 )
-from circle_memory_core.storage import find_group, save_user_groups
+from circle_memory_core.storage import (
+    append_message_log,
+    find_group,
+    read_message_log,
+    save_user_groups,
+    write_group_archive,
+    write_personal_archive,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +45,93 @@ class CommandHandlers:
         self.star = star
         self.codes = codes
         self.sessions = sessions
+
+    # ---------- 消息流水（mine_only 数据源；best-effort） ----------
+
+    def record_message(self, event) -> None:
+        """记录组内成员消息到流水（跳过 /shared 命令）。异常不影响主流程。"""
+        try:
+            if not self.star.config.get("enabled", True):
+                return
+            umo = event.unified_msg_origin or ""
+            if not umo:
+                return
+            group = group_for_umo(self.star.config.get("user_groups", []), umo)
+            if group is None:
+                return
+            text = event.message_str.strip()
+            if not text or text.startswith("/shared") or text.startswith("shared "):
+                return
+            append_message_log(group, umo, event.get_sender_name(), text)
+        except Exception as e:
+            logger.debug("[CircleMemory] 记录消息流水失败（忽略）: %s", e)
+
+    # ---------- 跨会话通知（best-effort） ----------
+
+    async def _notify_umo(self, umo: str, text: str) -> bool:
+        """向指定会话发送一条通知（尽力而为）。返回是否成功。"""
+        try:
+            platform_id = umo.split(":", 1)[0]
+            platform = self.star.context.get_platform_inst(platform_id)
+            if not platform:
+                return False
+            session = MessageSession.from_str(umo)
+            chain = MessageChain().message(text)
+            await platform.send_by_session(session, chain)
+            return True
+        except Exception as e:
+            logger.warning("[CircleMemory] 通知会话 %s 失败: %s", umo, e)
+            return False
+
+    async def _notify_members(self, umos: list, text: str, exclude: set | None = None) -> int:
+        """向组内成员广播通知（排除 exclude），返回成功数。"""
+        ok = 0
+        for umo in umos:
+            if exclude and umo in exclude:
+                continue
+            if await self._notify_umo(umo, text):
+                ok += 1
+        return ok
+
+    # ---------- 退出数据处理（双策略） ----------
+
+    async def _handle_exit_data(
+        self, event, group_name: str, umo: str, sender_name: str, kicked: bool = False
+    ) -> None:
+        """按 exit_data_policy 处理退出/被踢成员的数据。
+
+        discard（默认）：无任何数据导出。
+        mine_only：从消息流水导出该成员自己的发言 → 服务器留档 + 尽力私聊发送；
+                   发送失败明确反馈「已保存到服务器但私聊发送失败」。
+        """
+        policy = self.star.config.get("exit_data_policy", EXIT_DATA_POLICY_DEFAULT)
+        if policy != "mine_only":
+            return
+        records = read_message_log(group_name, umo)
+        if not records:
+            return
+        lines = []
+        for r in records:
+            sender = r.get("sender") or ""
+            ts = r.get("ts") or 0
+            t = datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+            lines.append(f"[{t}] {sender}: {r.get('text', '')}")
+        if not lines:
+            return
+        content = "\n".join(lines)
+        path = write_personal_archive(group_name, umo, sender_name, records)
+        saved = "（已保存到服务器）" if path else "（服务器保存失败）"
+        verb = "被移出" if kicked else "退出"
+        msg = (
+            f"你已{verb}组「{group_name}」。\n"
+            f"你在组内说过的话已导出如下，{saved}：\n\n"
+            f"{content[:3000]}"
+        )
+        ok = await self._notify_umo(umo, msg)
+        if not ok:
+            await event.send(event.plain_result(
+                f"注意：{verb}成员的发言记录已保存到服务器，但私聊发送失败（对方可能无法接收私聊）。"
+            ))
 
     # ---------- 路由 ----------
 
@@ -43,6 +148,8 @@ class CommandHandlers:
             await self.cmd_list(event)
         elif cmd == "dissolve":
             await self.cmd_dissolve(event, arg)
+        elif cmd == "remove":
+            await self.cmd_remove(event, arg)
         elif cmd == "code":
             await self.cmd_code(event, arg)
         elif cmd == "id":
@@ -129,6 +236,33 @@ class CommandHandlers:
 
     # ---------- 退出 ----------
 
+    async def _reset_session(self, cm, umo: str) -> bool:
+        """重置会话为独立空对话；成功返回 True。"""
+        try:
+            await cm.new_conversation(umo)
+            return True
+        except Exception as e:
+            logger.error("[CircleMemory] 重置会话失败: %s", e)
+            return False
+
+    async def _archive_and_remove_group(
+        self, cm, group_name: str, members: list
+    ) -> None:
+        """末人退出/解散：先归档整组历史，再物理删除共享会话并移除组配置。"""
+        # 归档（best-effort，失败不阻塞删除）
+        try:
+            content = await self.sessions.get_group_content(group_name)
+            merged = dict(self.star.config.get("merged", {}))
+            gid = merged.get(group_name, "")
+            if content:
+                write_group_archive(group_name, gid, members, content, "解散/末人退出")
+        except Exception as e:
+            logger.error("[CircleMemory] 归档组 %s 失败（继续删除）: %s", group_name, e)
+        await self.sessions.delete_shared_conversation(cm, group_name)
+        merged = dict(self.star.config.get("merged", {}))
+        merged.pop(group_name, None)
+        self.star.config["merged"] = merged
+
     async def cmd_leave(self, event, name: str) -> None:
         """退出组。组名可省略：省略时退出当前会话所在组。"""
         umo = event.unified_msg_origin or ""
@@ -145,37 +279,119 @@ class CommandHandlers:
             await event.send(event.plain_result(f"当前会话不在组「{target_name}」中"))
             return
 
+        remaining_after = [u for u in target.get("umos", []) if u != umo]
         # 1. 先重置会话为独立空对话（成功才继续；失败则保持组内身份不变）
         cm = self.star.context.conversation_manager
-        try:
-            await cm.new_conversation(umo)
-        except Exception as e:
-            logger.error("[CircleMemory] 重置会话失败，已取消退出: %s", e)
+        if not await self._reset_session(cm, umo):
             await event.send(event.plain_result("退出失败：会话重置出错，请重试"))
             return
 
-        # 2. 移除成员；创建者退出 → 移交组管理员；最后一个会话退出 → 物理删除共享会话并自动解散组
-        target["umos"] = [u for u in target.get("umos", []) if u != umo]
+        # 2. 移除成员；创建者退出 → 移交组管理员；最后一个会话退出 → 归档并自动解散组
+        target["umos"] = remaining_after
         remaining = target.get("umos", [])
         if remaining and target.get("owner") == umo:
             transfer_ownership(target)
         if not remaining:
-            await self.sessions.delete_shared_conversation(cm, target_name)
+            await self._archive_and_remove_group(cm, target_name, list(target.get("umos", [])) + [umo])
             user_groups = [g for g in user_groups if g.get("name") != target_name]
-            merged = dict(self.star.config.get("merged", {}))
-            merged.pop(target_name, None)
-            self.star.config["merged"] = merged
         save_user_groups(self.star.config, user_groups)
+
+        # 3. 通知剩余成员（best-effort）
+        if remaining:
+            await self._notify_members(
+                remaining,
+                f"成员「{event.get_sender_name() or umo}」已退出组「{target_name}」（剩余 {len(remaining)} 人）",
+            )
+
+        # 4. 按策略处理退出者数据（mine_only 时导出其个人发言）
+        await self._handle_exit_data(event, target_name, umo, event.get_sender_name())
 
         if not remaining:
             await event.send(event.plain_result(
-                f"已退出组「{target_name}」，组内无剩余成员，组已自动解散。\n"
+                f"已退出组「{target_name}」，组内无剩余成员，组已自动解散（历史已归档）。\n"
                 f"注意：你已失去该组的共享上下文，之前的对话不会随你跨平台延续。"
             ))
         else:
             await event.send(event.plain_result(
                 f"已退出组「{target_name}」。\n"
                 f"注意：你已失去该组的共享上下文，之前在其他平台的对话将无法继续接续。"
+            ))
+
+    # ---------- 踢人（组管理员） ----------
+
+    async def cmd_remove(self, event, arg: str) -> None:
+        """将成员移出组。仅组管理员（owner）可操作；owner 本人不可被移除。
+
+        语法：/shared remove [组名] <成员会话ID>（组内可省略组名）。
+        被移除成员与主动退出同等处理：会话重置、组 ID 失效、
+        通知剩余成员、按 exit_data_policy 处理其数据。
+        """
+        umo = event.unified_msg_origin or ""
+        user_groups = list(self.star.config.get("user_groups", []))
+        parsed = resolve_remove_target(arg, user_groups, umo)
+        if parsed is None:
+            await event.send(event.plain_result(
+                "用法: /shared remove [组名] <成员会话ID>（仅组管理员；组内可省略组名）"
+            ))
+            return
+        group_name, target_umo = parsed
+        target = next((g for g in user_groups if g.get("name") == group_name), None)
+        if target is None:
+            await event.send(event.plain_result(f"组「{group_name}」不存在"))
+            return
+
+        # 权限：仅组管理员（owner）；平台管理员兜底
+        is_admin = getattr(event, "role", "") == "admin"
+        if umo != target.get("owner") and not is_admin:
+            await event.send(event.plain_result(
+                f"只有组管理员（创建者）可以移除成员，你不是组「{group_name}」的管理员"
+            ))
+            return
+        # owner 本人不可被移除
+        if target_umo == target.get("owner"):
+            await event.send(event.plain_result(
+                f"不能移除组管理员本人。如需解散请用 /shared dissolve {group_name}"
+            ))
+            return
+        if target_umo not in target.get("umos", []):
+            await event.send(event.plain_result(f"会话 {target_umo} 不在组「{group_name}」中"))
+            return
+        if target_umo == umo:
+            await event.send(event.plain_result("不能移除自己，如需退出请用 /shared leave"))
+            return
+
+        # 1. 重置被移除成员会话（失败则中止移除，保持现状）
+        cm = self.star.context.conversation_manager
+        if not await self._reset_session(cm, target_umo):
+            await event.send(event.plain_result(f"移除失败：成员 {target_umo} 会话重置出错，请重试"))
+            return
+
+        # 2. 移除成员
+        target["umos"] = [u for u in target.get("umos", []) if u != target_umo]
+        remaining = target.get("umos", [])
+        if not remaining:
+            # 组内只剩被移除者 → 归档并解散组
+            await self._archive_and_remove_group(cm, group_name, list(target.get("umos", [])) + [target_umo])
+            user_groups = [g for g in user_groups if g.get("name") != group_name]
+        save_user_groups(self.star.config, user_groups)
+
+        # 3. 通知剩余成员
+        if remaining:
+            await self._notify_members(
+                remaining,
+                f"成员 {target_umo} 已被移出组「{group_name}」（剩余 {len(remaining)} 人）",
+            )
+
+        # 4. 按策略处理被移除成员数据
+        await self._handle_exit_data(event, group_name, target_umo, "", kicked=True)
+
+        if not remaining:
+            await event.send(event.plain_result(
+                f"已移除 {target_umo}，组内已无剩余成员，组「{group_name}」已解散（历史已归档）。"
+            ))
+        else:
+            await event.send(event.plain_result(
+                f"已移除 {target_umo}。对方已失去该组的共享上下文，且无法再查看组 ID。"
             ))
 
     # ---------- 列表 ----------
@@ -282,25 +498,17 @@ class CommandHandlers:
         cm = self.star.context.conversation_manager
         # 1. 先重置所有成员为独立空对话（成功才继续；任一失败则中止解散）
         for member in members:
-            try:
-                await cm.new_conversation(member)
-            except Exception as e:
-                logger.error("[CircleMemory] 重置会话 %s 失败，已取消解散: %s", member, e)
+            if not await self._reset_session(cm, member):
                 await event.send(event.plain_result("解散失败：会话重置出错，请重试"))
                 return
 
-        # 2. 物理删除共享会话（含全部共享历史）
-        await self.sessions.delete_shared_conversation(cm, target_name)
-
-        # 3. 移除组配置
+        # 2. 归档整组历史，再物理删除共享会话并移除组配置
+        await self._archive_and_remove_group(cm, target_name, members)
         user_groups = [g for g in user_groups if g.get("name") != target_name]
-        merged = dict(self.star.config.get("merged", {}))
-        merged.pop(target_name, None)
-        self.star.config["merged"] = merged
         save_user_groups(self.star.config, user_groups)
 
         await event.send(event.plain_result(
-            f"组「{target_name}」已解散。所有成员已断开共享上下文，共享历史已删除。"
+            f"组「{target_name}」已解散。所有成员已断开共享上下文，共享历史已归档后删除。"
         ))
 
     # ---------- 邀请码 ----------

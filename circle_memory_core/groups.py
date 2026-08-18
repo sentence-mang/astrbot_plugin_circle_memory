@@ -130,3 +130,30 @@ def transfer_ownership(group: dict) -> None:
     current = group.get("owner")
     members = [m for m in (group.get("umos") or []) if m != current]
     group["owner"] = members[0] if members else None
+
+
+def resolve_remove_target(arg: str, user_groups: list, umo: str) -> tuple[str, str] | None:
+    """解析 /shared remove 参数 → (组名, 目标成员 UMO)。
+
+    两种形式：
+    - 显式组名：`remove <组名> <成员UMO>`（组外管理员可用）
+    - 省略组名：`remove <成员UMO>`（当前会话必须已在某组，即组管理员在自己的组内踢人）
+    返回 None 表示参数无法解析。
+    """
+    parts = [p for p in (arg or "").split() if p]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        # 省略组名：目标成员 UMO 即唯一参数
+        target_umo = parts[0]
+        group_name = group_for_umo(user_groups, umo)
+        if not group_name:
+            return None
+        return group_name, target_umo
+    if len(parts) == 2:
+        group_name, target_umo = parts
+        # 仅当第一个词是已知组名时才按「组名+成员」解析，否则视为无法解析
+        if group_name in [g.get("name") for g in user_groups]:
+            return group_name, target_umo
+        return None
+    return None

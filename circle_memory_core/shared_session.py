@@ -28,6 +28,30 @@ class SharedSessionManager:
     def find_group(self, name: str) -> dict | None:
         return find_group(self.star.config, name)
 
+    async def get_group_content(self, group_name: str) -> list:
+        """读取组共享历史的完整消息列表（供归档/导出）。
+
+        返回空列表表示无共享会话或读取失败。
+        """
+        merged = dict(self.star.config.get("merged", {}))
+        shared_cid = merged.get(group_name)
+        if not shared_cid:
+            return []
+        try:
+            conv = await self.star.context.conversation_manager.db.get_conversation_by_id(cid=shared_cid)
+            if not conv:
+                return []
+            content = conv.content
+            if isinstance(content, str):
+                try:
+                    return json.loads(content) or []
+                except (ValueError, TypeError):
+                    return []
+            return list(content or [])
+        except Exception as e:
+            logger.error("[CircleMemory] 读取组 %s 共享历史失败: %s", group_name, e)
+            return []
+
     # ---------- 删除 ----------
 
     async def delete_shared_conversation(self, cm, group: str) -> None:
