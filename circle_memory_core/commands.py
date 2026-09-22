@@ -9,13 +9,11 @@ import hashlib
 import logging
 import time
 
-from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.message_session import MessageSession
 
 from circle_memory_core.constants import (
     EXIT_DATA_POLICY_DEFAULT,
-    KNOWN_COMMANDS,
     MAX_ALIAS_LEN,
     MAX_GROUP_NAME_LEN,
     USAGE_TEXT,
@@ -143,7 +141,7 @@ class CommandHandlers:
         for r in records:
             sender = r.get("sender") or ""
             ts = r.get("ts") or 0
-            t = datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+            t = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).astimezone().strftime("%m-%d %H:%M")
             lines.append(f"[{t}] {sender}: {r.get('text', '')}")
         if not lines:
             return
@@ -760,7 +758,7 @@ class CommandHandlers:
             await event.send(event.plain_result(f"组「{group_name}」暂无共享历史"))
             return
         try:
-            provider = self.star.context.get_using_provider()
+            provider = await self.star.context.get_using_provider_async()
             if not provider:
                 await event.send(event.plain_result("当前没有可用的 LLM provider，无法生成摘要"))
                 return

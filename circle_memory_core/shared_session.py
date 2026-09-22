@@ -6,6 +6,7 @@ AstrBot 原生按 UMO → conversation_id 读写历史，因此天然共享，O(
 """
 
 import asyncio
+import json
 import logging
 
 from circle_memory_core.groups import group_cid, group_for_umo, normalize_groups

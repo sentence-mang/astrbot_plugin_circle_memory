@@ -142,6 +142,7 @@ await cm.add_message_pair(
 | `exit_data_policy` | string | `discard` | 退出/被踢成员数据处理：`discard`=会话重置无副本；`mine_only`=额外导出该成员自己的发言（服务器留档 + 尽力私聊发送，发送失败明确反馈） |
 | `archive_keep` | int | `10` | 解散/末人退出归档保留份数，超过自动清理最旧 |
 | `media_mode` | string | `placeholder` | 共享历史图片处理：`ignore`=移除；`placeholder`=替换 `[图片]` 占位；`caption`=调用 LLM 转述（消耗 token） |
+| `caption_provider_id` | string | `""` | `media_mode=caption` 时用于图片转述的 provider ID；留空使用当前会话 provider；配置了但找不到对应 provider 时会记日志并退回当前会话 provider |
 | `image_window` | int | `0` | 图片轮数控制：仅保留最近 N 条用户消息中的图片（0=全部按 media_mode 处理），更早的转占位（省 token） |
 | `history_budget` | int | `0` | 共享历史字符预算上限（0=不限制）；超限时折叠：最近消息全量 + 头部摘要 + 中段省略 |
 | `summary_enabled` | bool | `false` | 折叠时是否调用 LLM 生成历史摘要（消耗 token；关闭时用省略标记） |

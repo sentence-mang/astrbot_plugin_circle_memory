@@ -10,7 +10,6 @@
   「最近 N 条全量 + 头部摘要 + 中段折叠」，摘要失败退化纯截断。
 """
 
-import datetime
 import logging
 
 from astrbot.core.provider.entities import ProviderRequest
@@ -72,7 +71,7 @@ class ContextEnhancer:
                 continue
             if ctx.get("role") == "user":
                 user_seen += 1
-            is_recent_img = user_seen >= keep_from if image_window > 0 else True
+            is_recent_img = user_seen > keep_from if image_window > 0 else True
             new_parts = []
             for item in content:
                 if not isinstance(item, dict) or item.get("type") != "image_url":
@@ -108,10 +107,24 @@ class ContextEnhancer:
             if req.image_urls:
                 req.image_urls = []
 
+    async def _get_caption_provider(self):
+        """图片转述用的 provider：优先 caption_provider_id 指定的 provider；
+        未配置或找不到时退回当前会话 provider。"""
+        provider_id = (self._cfg("caption_provider_id", "") or "").strip()
+        if provider_id:
+            provider = self.star.context.get_provider_by_id(provider_id)
+            if provider:
+                return provider
+            logger.warning(
+                "[CircleMemory] caption_provider_id=%s 未找到对应 provider，退回当前会话 provider",
+                provider_id,
+            )
+        return await self.star.context.get_using_provider_async()
+
     async def _caption_image(self, url: str) -> str:
-        """调用 LLM 转述图片（用当前会话 provider；失败返回空串）。"""
+        """调用 LLM 转述图片（用 caption_provider_id 或当前会话 provider；失败返回空串）。"""
         try:
-            provider = self.star.context.get_using_provider()
+            provider = await self._get_caption_provider()
             if not provider:
                 return ""
             resp = await provider.text_chat(
@@ -197,7 +210,7 @@ class ContextEnhancer:
             summary = ""
             if summary_on:
                 try:
-                    provider = self.star.context.get_using_provider()
+                    provider = await self.star.context.get_using_provider_async()
                     if provider:
                         mid_text = "\n".join(
                             self._content_text(c.get("content", ""))[:400]
