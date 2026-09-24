@@ -44,6 +44,16 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+# AstrBot 卸载/重载插件时只清理 `data.plugins.<插件目录>` 前缀的模块
+# （star_manager._cleanup_plugin_state），而 circle_memory_core 是上面用
+# sys.path.insert 以「顶层包」方式导入的，不在清理范围内。后果：插件文件
+# 更新后重载时，旧版 circle_memory_core 仍残留在 sys.modules 里，新 main.py
+# 拿到的是旧模块对象——表现为「磁盘上明明是新的，却报 cannot import name XXX」，
+# 且每次重载都复现，只有重启 AstrBot 进程才能恢复。此处导入前主动清理，
+# 使「更新文件 → 重载插件」即可生效，无需重启容器。
+for _stale in [m for m in list(sys.modules) if m == "circle_memory_core" or m.startswith("circle_memory_core.")]:
+    del sys.modules[_stale]
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import on_llm_request, on_waiting_llm_request

@@ -2,7 +2,7 @@ name: astrbot_plugin_circle_memory
 display_name: 跨平台共享上下文（circle_memory）
 short_desc: 在飞书聊到一半，切微信/QQ 接着聊——多平台会话组成共享组，共享同一份对话历史；组 ID 即 conversation_id，其他插件零适配读写。
 author: sentence-mang
-version: "1.3.1"
+version: "1.3.2"
 desc: |
   在飞书聊了一半的对话，切到微信、QQ 接着聊，AI 记得之前说过什么——把多个平台（飞书、微信、QQ、Telegram 等）的多个会话组成「会话组」，组内跨平台共享同一份对话历史。
 

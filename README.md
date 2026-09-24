@@ -3,7 +3,7 @@
 跨平台共享上下文插件（circle_memory）：在飞书聊了一半的对话，切到微信、QQ 接着聊，AI 记得之前说过什么——把多个平台的多个会话组织成同一个**会话组**，组内共享同一份对话历史。组的身份是一个稳定的组 ID，任何第三方插件都可以直接用这个 ID 读写组共享会话，无需适配。
 
 - **作者**: sentence-mang
-- **版本**: 1.3.1
+- **版本**: 1.3.2
 - **兼容性**: AstrBot >= 4.0.0
 - **许可证**: MIT
 - **仓库**: https://github.com/sentence-mang/astrbot_plugin_circle_memory
@@ -249,11 +249,13 @@ python3 test_integration.py # 集成测试（需在 AstrBot 环境内运行）
 - **主动消息 / 第三方插件主动调用 LLM 可能绕过共享机制**：circle_memory 依赖 AstrBot 的 `on_waiting_llm_request`/`on_llm_request` 钩子在每次真实消息触发的 LLM 请求前完成会话切换。如果其他插件使用 `Context.llm_generate()`/`Context.tool_loop_agent()` 主动对组内成员发起 LLM 调用（而不是通过一条真实的用户消息触发），这两个钩子不会被触发，circle_memory 的会话切换与上下文增强（媒体降级/成员标注/预算折叠）都不会生效；如果调用方遵循 AstrBot 推荐的写法（调用前用 `ConversationManager.get_curr_conversation_id(umo)` 取当前对话），且该成员在加入组后已发生过至少一次真实消息，会话已经处于切换状态，可能凑巧拿到正确的共享历史，但这不是 circle_memory 主动保证的——需要主动调用时，请在发起 LLM 调用前显式调用 `resolve_shared_cid(umo)`，见第 4.1 节；
 - **`group_message_history_enable` 群聊消息历史不受影响**：AstrBot 另有一套独立的、默认关闭的群聊消息历史（按平台+UMO 存储，与本插件统一的 `conversation.content` 是两套数据），circle_memory 目前不会同步/合并这部分数据；
 - **`circle_memory_core/*.py` 里的日志可能不会按插件单独分级**：这些子模块通过 `main.py` 里 `sys.path.insert` 后以顶层包 `circle_memory_core` 的方式导入（而不是插件自身命名空间下的子包），`astrbot.api.logger` 按调用者模块名前缀匹配插件的逻辑因此可能匹配不到，日志会退回全局 `astrbot` logger，而不是 `CircleMemoryStar` 专属 logger——仍然是走 AstrBot 自己的日志系统（不是裸 `logging` 模块），只是暂时享受不到"按插件单独调日志级别"这个功能。要完全解决需要把 `circle_memory_core` 改成插件自身命名空间下的相对导入子包，但那样现有测试套件（`from main import CircleMemoryStar` 这种顶层导入方式）也要跟着大改，这次先不动。
+- **替换插件文件后必须触发一次重载**：AstrBot 不监测插件目录的文件变化，直接覆盖文件不会自动生效，需在 WebUI 点「重载」。1.3.2 起 `main.py` 会先清掉 `sys.modules` 里的旧 `circle_memory_core` 再重新导入，因此重载即可生效、无需重启；若重载仍报 `cannot import name ...`，说明进程中的残留模块早于本次修复，重启一次 AstrBot 容器即可，之后不再复发。
 
 ## 13. 版本历史
 
 | 版本 | 变更 |
 |---|---|
+| 1.3.2 | 修复「更新插件文件后重载必失败」：AstrBot 重载插件时只清理 `data.plugins.<插件目录>` 前缀的模块（`star_manager._cleanup_plugin_state`），而 `circle_memory_core` 是 `main.py` 用 `sys.path.insert` 以顶层包方式导入的，不在清理范围内——旧版模块残留在 `sys.modules` 中，新 `main.py` 导入到的是旧模块对象，报 `cannot import name ...`，且每次重载都复现、只能重启 AstrBot 进程才能恢复。现在 `main.py` 在导入 `circle_memory_core` 前主动清理残留模块，「更新文件 → 重载插件」即可生效 |
 | 1.3.1 | 插件上架合规修复：全部改用 `from astrbot.api import logger`（不再直接 `import logging`）；`shared_session.py` 的 `get_group_content()`/`ensure_group_conversation()` 改为尽量走 `ConversationManager` 公共方法（`get_conversation()`/`delete_conversation()`）而非直接 `cm.db.*`——唯一保留的例外是创建共享会话时必须指定组 ID 作为 `conversation_id`，而 `ConversationManager` 未提供「按指定 cid 创建」的公共方法，这一步仍直接调用 `cm.db.create_conversation(cid=...)`（已加注释说明） |
 | 1.3.0 | 技术债与健壮性：aliases/pins/消息流水/归档文件统一从「组名为 key」迁移为「组 ID 为 key」（幂等迁移，解决组名 sanitize 后可能撞车导致跨组数据混淆的问题）；`_apply_member_context` 简化为直接按组 ID 查组；circle_memory 自身的图片转述/摘要 LLM 调用改为跟随触发者会话的 provider 偏好（对齐 AstrBot 核心同一模式）；修复 `shared_session.py` 缺失 `import json`（`get_group_content` 在 content 为字符串时会静默失败）、`image_window` 图片轮数控制的差一错误（多保留一条）；`caption_provider_id` 从未使用的幽灵配置项改为真正生效；`get_using_provider` 改为非废弃的 `get_using_provider_async`；退出流水时间戳补上时区；新增 CI（ruff + 测试）；README 补充已知限制（provider 会话隔离、主动消息 / 第三方插件绕过共享机制、群聊消息历史为独立存储） |
 | 1.2.0 | 架构规整（薄壳 + circle_memory_core 子包）；改名 circle_memory（避免市场同名）；退出机制（remove 踢人、退出/移除通知、解散归档、exit_data_policy 双策略、消息流水）；上下文增强（media_mode 媒体降级、成员标注单次注入、历史预算折叠 + AI 摘要、image_window 图片轮数）；alias/pin/summary 命令；leave 序号/all；dissolve 二次确认；消息去重与命令过滤 |
