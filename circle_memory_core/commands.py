@@ -6,9 +6,9 @@ codes（CodeManager）、sessions（SharedSessionManager）。
 
 import datetime
 import hashlib
-import logging
 import time
 
+from astrbot.api import logger
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.message_session import MessageSession
 
@@ -40,9 +40,6 @@ from circle_memory_core.storage import (
     write_group_archive,
     write_personal_archive,
 )
-
-logger = logging.getLogger(__name__)
-
 
 class CommandHandlers:
     # 消息去重时间窗（秒）：同会话同文本在窗口内只记录一次，防事件重复触发双写

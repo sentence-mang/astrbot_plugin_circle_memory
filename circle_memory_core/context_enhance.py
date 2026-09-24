@@ -10,11 +10,8 @@
   「最近 N 条全量 + 头部摘要 + 中段折叠」，摘要失败退化纯截断。
 """
 
-import logging
-
+from astrbot.api import logger
 from astrbot.core.provider.entities import ProviderRequest
-
-logger = logging.getLogger(__name__)
 
 
 class ContextEnhancer:

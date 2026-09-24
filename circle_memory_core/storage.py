@@ -6,15 +6,14 @@
 """
 
 import json
-import logging
 import os
 import re
 import time
 from pathlib import Path
 
-from .constants import ARCHIVE_KEEP, MESSAGE_LOG_MAX
+from astrbot.api import logger
 
-logger = logging.getLogger(__name__)
+from .constants import ARCHIVE_KEEP, MESSAGE_LOG_MAX
 
 
 def get_plugin_data_dir() -> Path:

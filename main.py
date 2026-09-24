@@ -35,7 +35,6 @@ get_conversation_by_id / update_conversation …），直接填写组 ID 即可
     commands.py        命令处理器
 """
 
-import logging
 import os
 import sys
 
@@ -45,6 +44,7 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import on_llm_request, on_waiting_llm_request
 from astrbot.api.star import Context, Star
@@ -75,8 +75,6 @@ from circle_memory_core.groups import (
 )
 from circle_memory_core.shared_session import SharedSessionManager
 from circle_memory_core.storage import migrate_keys_to_group_id, save_user_groups
-
-logger = logging.getLogger(__name__)
 
 # 兼容旧 import（测试脚本直接引用）：保持符号可从 main 导入
 __all__ = [

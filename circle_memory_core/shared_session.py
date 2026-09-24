@@ -7,12 +7,11 @@ AstrBot 原生按 UMO → conversation_id 读写历史，因此天然共享，O(
 
 import asyncio
 import json
-import logging
+
+from astrbot.api import logger
 
 from circle_memory_core.groups import group_cid, group_for_umo, normalize_groups
 from circle_memory_core.storage import find_group, save_merged, save_user_groups
-
-logger = logging.getLogger(__name__)
 
 
 class SharedSessionManager:
@@ -39,10 +38,15 @@ class SharedSessionManager:
         if not shared_cid:
             return []
         try:
-            conv = await self.star.context.conversation_manager.db.get_conversation_by_id(cid=shared_cid)
+            cm = self.star.context.conversation_manager
+            # 走 ConversationManager.get_conversation()（公共接口）而非 cm.db 直查；
+            # unified_msg_origin 传空字符串：create_if_not_exists=False 时该参数
+            # 不会被使用，不会创建/触碰任何真实 UMO 的会话。返回的是 v1 格式
+            # Conversation，history 字段是 JSON 字符串（非 v2 的原生 list）。
+            conv = await cm.get_conversation("", shared_cid, create_if_not_exists=False)
             if not conv:
                 return []
-            content = conv.content
+            content = conv.history
             if isinstance(content, str):
                 try:
                     return json.loads(content) or []
@@ -71,10 +75,14 @@ class SharedSessionManager:
     # ---------- 创建/迁移 ----------
 
     async def ensure_group_conversation(self, cm, group: dict, source_cid: str | None = None) -> str:
-        """幂等：保证组共享会话以 cid=组 id 存在于 DB；source_cid 提供时继承其内容。返回组 cid。"""
+        """幂等：保证组共享会话以 cid=组 id 存在于 DB；source_cid 提供时继承其内容。返回组 cid。
+
+        除创建这一步外，其余查询/删除均走 ConversationManager 的公共方法，
+        不直接碰 cm.db。
+        """
         gid = group_cid(group)
         try:
-            existing = await cm.db.get_conversation_by_id(cid=gid)
+            existing = await cm.get_conversation("", gid, create_if_not_exists=False)
             if existing:
                 return gid
         except Exception as e:
@@ -82,17 +90,26 @@ class SharedSessionManager:
             return gid
 
         source = None
+        source_content: list = []
         if source_cid:
             try:
-                source = await cm.db.get_conversation_by_id(cid=source_cid)
+                source = await cm.get_conversation("", source_cid, create_if_not_exists=False)
+                if source:
+                    source_content = json.loads(source.history or "[]") or []
             except Exception as e:
                 logger.error("[CircleMemory] 读取源会话 %s 失败: %s", source_cid, e)
 
         try:
+            # ConversationManager 未提供「以调用方指定的 cid 创建对话」的公共方法——
+            # new_conversation() 只能拿到内部随机生成的 uuid，无法指定为组 ID。
+            # 而「组共享会话的 conversation_id 即组 ID 本身」是本插件对外的核心
+            # 契约（见 README 第 4 节），因此这一步不得不直接调用数据库层的
+            # create_conversation(cid=...)。这是本文件唯一必须绕过
+            # ConversationManager 的地方；其余读取/删除均已改为走公共接口。
             await cm.db.create_conversation(
                 user_id=(source.user_id if source else "circle_memory"),
                 platform_id=(source.platform_id if source else "unknown"),
-                content=(source.content or []) if source else [],
+                content=source_content if source else [],
                 title=(source.title if source else group.get("name")),
                 persona_id=(source.persona_id if source else None),
                 cid=gid,
@@ -101,7 +118,7 @@ class SharedSessionManager:
         except Exception as e:
             # 并发竞态下另一任务可能已创建成功（UNIQUE 约束）：视为幂等成功
             try:
-                existing = await cm.db.get_conversation_by_id(cid=gid)
+                existing = await cm.get_conversation("", gid, create_if_not_exists=False)
                 if existing:
                     return gid
             except Exception:
@@ -112,7 +129,7 @@ class SharedSessionManager:
         # 继承完成后清理旧会话（失败仅记日志，下次加载幂等续迁）
         if source_cid and source is not None and source_cid != gid:
             try:
-                await cm.db.delete_conversation(cid=source_cid)
+                await cm.delete_conversation("", conversation_id=source_cid)
                 logger.info("[CircleMemory] 旧共享会话 %s 已删除", source_cid)
             except Exception as e:
                 logger.error("[CircleMemory] 删除旧会话 %s 失败（下次加载幂等续迁）: %s", source_cid, e)
@@ -180,14 +197,18 @@ class SharedSessionManager:
 
     # ---------- LLM 请求前切换 ----------
 
-    async def ensure_llm_shared(self, event) -> None:
-        """LLM 请求前把组内会话切到共享 conversation。任何异常交由调用方放行原流程。"""
-        if not self.star.config.get("enabled", True):
-            return
+    async def resolve_shared_cid(self, umo: str) -> str | None:
+        """把 umo 所在组（如有）的共享会话补齐/切到位，返回组共享 conversation_id；
+        umo 不属于任何组、插件被禁用、或组配置异常时返回 None。
 
-        umo = event.unified_msg_origin or ""
-        if not umo:
-            return
+        这是 ensure_llm_shared() 的 umo-only 版本，专供第三方插件在「主动」
+        对某个 UMO 生成/调用 LLM 之前调用——例如用 Context.llm_generate()/
+        tool_loop_agent() 主动发起对话。这类主动调用不经过
+        on_waiting_llm_request 钩子，circle_memory 不会自动介入，需要调用方
+        显式调这个方法拿到正确的 conversation_id。用法见 README 4.1 节。
+        """
+        if not umo or not self.star.config.get("enabled", True):
+            return None
 
         # 运行时防御：组缺 id（配置被外部编辑）→ 立即补齐并持久化
         groups = self.star.config.get("user_groups", [])
@@ -198,14 +219,13 @@ class SharedSessionManager:
 
         group = group_for_umo(groups, umo)
         if group is None:
-            return
-
+            return None
         target = self.find_group(group)
         if target is None:
-            return
+            return None
         gid = group_cid(target)
         if not gid:
-            return
+            return None
 
         cm = self.star.context.conversation_manager
         merged = dict(self.star.config.get("merged", {}))
@@ -213,9 +233,14 @@ class SharedSessionManager:
         # 组共享会话未就位（新组/旧版 uuid/迁移中断）→ 幂等补齐并迁移
         if merged.get(group) != gid:
             await self.ensure_group_shared(group, umo)
-            merged = dict(self.star.config.get("merged", {}))
 
         cid = await cm.get_curr_conversation_id(umo)
         if cid != gid:
             await cm.switch_conversation(umo, gid)
             logger.info("[CircleMemory] 会话 %s 已切到组 %s 共享会话 %s", umo, group, gid)
+        return gid
+
+    async def ensure_llm_shared(self, event) -> None:
+        """LLM 请求前把组内会话切到共享 conversation。任何异常交由调用方放行原流程。"""
+        umo = event.unified_msg_origin or ""
+        await self.resolve_shared_cid(umo)
