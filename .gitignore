@@ -4,6 +4,10 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.ruff_cache/
+
+# 测试运行副产物（astrbot 运行时在当前目录创建）
+data/
 
 # 本地环境
 .env

@@ -469,10 +469,10 @@ async def test_alias_set_and_permission(tmp):
     star = CircleMemoryStar(None, config)
     star.context = SimpleNamespace(conversation_manager=cm)
 
-    # 1) 本人设置自己的昵称
+    # 1) 本人设置自己的昵称（aliases 以组 ID 为 key，而非组名）
     member = FakeEvent("qq::u2", role="member")
     await star._cmd_alias(member, "qq::u2 阿Q")
-    assert config["aliases"]["fam"]["qq::u2"] == "阿Q", config["aliases"]
+    assert config["aliases"]["g-aaaaaaaa"]["qq::u2"] == "阿Q", config["aliases"]
 
     # 2) 非本人非 owner 尝试设置他人 → 拒绝
     member2 = FakeEvent("qq::u2", role="member")
@@ -482,12 +482,12 @@ async def test_alias_set_and_permission(tmp):
     # 3) owner 可设置任意成员
     owner = FakeEvent("feishu::u1", role="member")
     await star._cmd_alias(owner, "fam qq::u2 小Q")
-    assert config["aliases"]["fam"]["qq::u2"] == "小Q", config["aliases"]
+    assert config["aliases"]["g-aaaaaaaa"]["qq::u2"] == "小Q", config["aliases"]
 
     # 4) 删除
     owner2 = FakeEvent("feishu::u1", role="member")
     await star._cmd_alias(owner2, "qq::u2 -")
-    assert "qq::u2" not in config["aliases"]["fam"]
+    assert "qq::u2" not in config["aliases"]["g-aaaaaaaa"]
 
     # 5) 查看
     viewer = FakeEvent("qq::u2", role="member")
@@ -568,15 +568,15 @@ async def test_pin_and_summary_permissions(tmp):
     assert "管理员" in member.replies[0][1], member.replies[0][1]
     assert "pins" not in config or not config.get("pins"), "非 owner 不应能设置 pin"
 
-    # 2) owner 设置 pin → 持久化
+    # 2) owner 设置 pin → 持久化（pins 以组 ID 为 key，而非组名）
     owner = FakeEvent("feishu::u1", role="member")
     await star._cmd_pin(owner, "fam 组内规矩")
-    assert config["pins"]["fam"] == "组内规矩", config["pins"]
+    assert config["pins"]["g-aaaaaaaa"] == "组内规矩", config["pins"]
 
     # 3) owner 清除 pin
     owner2 = FakeEvent("feishu::u1", role="member")
     await star._cmd_pin(owner2, "fam -")
-    assert "fam" not in config.get("pins", {}), config.get("pins")
+    assert "g-aaaaaaaa" not in config.get("pins", {}), config.get("pins")
 
     # 4) 非 owner 生成摘要 → 拒绝
     member2 = FakeEvent("qq::u2", role="member")

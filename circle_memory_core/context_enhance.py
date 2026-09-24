@@ -41,9 +41,10 @@ class ContextEnhancer:
         try:
             if not self.is_shared_request(req):
                 return
-            await self._apply_media_mode(req)
+            umo = getattr(event, "unified_msg_origin", None) if event else None
+            await self._apply_media_mode(req, umo)
             self._apply_member_context(req)
-            await self._apply_budget(req, event)
+            await self._apply_budget(req, umo)
         except Exception as e:
             logger.error("[CircleMemory] 上下文增强失败（放行原请求）: %s", e)
 
@@ -52,7 +53,7 @@ class ContextEnhancer:
     def _text_part(self, text: str) -> dict:
         return {"type": "text", "text": text}
 
-    async def _apply_media_mode(self, req: ProviderRequest) -> None:
+    async def _apply_media_mode(self, req: ProviderRequest, umo: str | None = None) -> None:
         mode = self._cfg("media_mode", "placeholder")
         if mode not in ("ignore", "placeholder", "caption"):
             return
@@ -91,7 +92,7 @@ class ContextEnhancer:
                     elif isinstance(img, str):
                         url = img
                     if url:
-                        cap = await self._caption_image(url)
+                        cap = await self._caption_image(url, umo)
                         new_parts.append(
                             self._text_part(f"[图片: {cap}]") if cap else self._text_part("[图片]")
                         )
@@ -107,9 +108,10 @@ class ContextEnhancer:
             if req.image_urls:
                 req.image_urls = []
 
-    async def _get_caption_provider(self):
+    async def _get_caption_provider(self, umo: str | None = None):
         """图片转述用的 provider：优先 caption_provider_id 指定的 provider；
-        未配置或找不到时退回当前会话 provider。"""
+        未配置或找不到时退回触发者当前会话 provider（umo 会话偏好，若启用了
+        provider 会话隔离）。对齐 AstrBot 核心自身图片转述兜底的同一模式。"""
         provider_id = (self._cfg("caption_provider_id", "") or "").strip()
         if provider_id:
             provider = self.star.context.get_provider_by_id(provider_id)
@@ -119,12 +121,12 @@ class ContextEnhancer:
                 "[CircleMemory] caption_provider_id=%s 未找到对应 provider，退回当前会话 provider",
                 provider_id,
             )
-        return await self.star.context.get_using_provider_async()
+        return await self.star.context.get_using_provider_async(umo)
 
-    async def _caption_image(self, url: str) -> str:
-        """调用 LLM 转述图片（用 caption_provider_id 或当前会话 provider；失败返回空串）。"""
+    async def _caption_image(self, url: str, umo: str | None = None) -> str:
+        """调用 LLM 转述图片（用 caption_provider_id 或触发者会话 provider；失败返回空串）。"""
         try:
-            provider = await self._get_caption_provider()
+            provider = await self._get_caption_provider(umo)
             if not provider:
                 return ""
             resp = await provider.text_chat(
@@ -141,14 +143,13 @@ class ContextEnhancer:
     # ---------- 成员标注（单次注入 system_prompt） ----------
 
     def _apply_member_context(self, req: ProviderRequest) -> None:
+        # 共享会话的 conversation_id 本身就是组 ID（group_cid 设计），
+        # 直接按 id 找组，不必再经 merged（组名→cid）绕一道。
         cid = req.conversation.cid if req.conversation else ""
-        merged = self.star.config.get("merged", {})
-        group_name = next((g for g, c in merged.items() if c == cid), None)
-        if not group_name:
+        if not cid:
             return
-        aliases = (self.star.config.get("aliases") or {}).get(group_name) or {}
         group = next(
-            (g for g in self.star.config.get("user_groups", []) if g.get("name") == group_name),
+            (g for g in self.star.config.get("user_groups", []) if g.get("id") == cid),
             None,
         )
         if not group:
@@ -156,8 +157,9 @@ class ContextEnhancer:
         members = group.get("umos", [])
         if not members:
             return
+        aliases = (self.star.config.get("aliases") or {}).get(cid) or {}
         # 组置顶记忆（pin）置于最前
-        pins = (self.star.config.get("pins") or {}).get(group_name) or ""
+        pins = (self.star.config.get("pins") or {}).get(cid) or ""
         head = ""
         if pins:
             head = f"【组置顶】{pins}\n\n"
@@ -185,7 +187,7 @@ class ContextEnhancer:
             return "".join(parts)
         return str(content)
 
-    async def _apply_budget(self, req: ProviderRequest, event) -> None:
+    async def _apply_budget(self, req: ProviderRequest, umo: str | None = None) -> None:
         budget = int(self._cfg("history_budget", 0) or 0)
         if budget <= 0:
             return
@@ -210,7 +212,7 @@ class ContextEnhancer:
             summary = ""
             if summary_on:
                 try:
-                    provider = await self.star.context.get_using_provider_async()
+                    provider = await self.star.context.get_using_provider_async(umo)
                     if provider:
                         mid_text = "\n".join(
                             self._content_text(c.get("content", ""))[:400]

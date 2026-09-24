@@ -270,13 +270,13 @@ def test_archive_roundtrip_and_cleanup():
     td = tempfile.mkdtemp()
     storage_mod.get_plugin_data_dir = lambda: __import__("pathlib").Path(td)
 
-    # 消息流水
-    storage_mod.append_message_log("fam", "feishu::u1", "小飞", "第一条")
-    storage_mod.append_message_log("fam", "qq::u2", "小Q", "第二条")
-    storage_mod.append_message_log("fam", "feishu::u1", "小飞", "第三条")
-    mine = storage_mod.read_message_log("fam", "feishu::u1")
+    # 消息流水（以组 ID 为 key，而非组名——见 storage.migrate_keys_to_group_id 的说明）
+    storage_mod.append_message_log("g-1", "feishu::u1", "小飞", "第一条")
+    storage_mod.append_message_log("g-1", "qq::u2", "小Q", "第二条")
+    storage_mod.append_message_log("g-1", "feishu::u1", "小飞", "第三条")
+    mine = storage_mod.read_message_log("g-1", "feishu::u1")
     assert len(mine) == 2 and all(r["umo"] == "feishu::u1" for r in mine), mine
-    all_rec = storage_mod.read_message_log("fam")
+    all_rec = storage_mod.read_message_log("g-1")
     assert len(all_rec) == 3
 
     # 组归档
@@ -291,7 +291,7 @@ def test_archive_roundtrip_and_cleanup():
     assert len(files) == 1, f"保留策略失败: {len(files)}"
 
     # 个人归档
-    pp = storage_mod.write_personal_archive("fam", "feishu::u1", "小飞", mine)
+    pp = storage_mod.write_personal_archive("fam", "g-1", "feishu::u1", "小飞", mine)
     assert pp and pp.exists()
 
     print("PASS archive roundtrip + cleanup + personal export")
@@ -391,6 +391,71 @@ def test_context_enhancer_media_and_budget():
     print("PASS enhancer media mode + budget folding")
 
 
+def test_migrate_keys_to_group_id():
+    """aliases/pins/消息流水/归档：组名 key → 组 ID key 迁移，幂等，且能解开
+    组名 sanitize 撞车（foo!bar 与 foo bar 都会变成 foo_bar）。"""
+    import tempfile
+    from pathlib import Path
+
+    from circle_memory_core import storage as storage_mod
+
+    td = tempfile.mkdtemp()
+    storage_mod.get_plugin_data_dir = lambda: Path(td)
+
+    user_groups = [
+        {"name": "fam", "id": "g-aaaaaaaa", "umos": ["feishu::u1"], "owner": "feishu::u1"},
+        # 组名 sanitize 后会撞车的两个组：foo!bar / foo bar → 都是 foo_bar
+        {"name": "foo!bar", "id": "g-bbbbbbbb", "umos": ["qq::u2"], "owner": "qq::u2"},
+        {"name": "foo bar", "id": "g-cccccccc", "umos": ["wechat::u3"], "owner": "wechat::u3"},
+    ]
+    config = {
+        "user_groups": user_groups,
+        "aliases": {"fam": {"feishu::u1": "小飞"}, "foo!bar": {"qq::u2": "阿Q"}},
+        "pins": {"fam": "旧置顶"},
+    }
+
+    # 旧格式的消息流水/归档文件（按 sanitize 后的组名命名，foo!bar 与 foo bar 撞车），
+    # 手写模拟 1.2.0 及更早版本留下的旧数据
+    (Path(td) / "message_log").mkdir(parents=True, exist_ok=True)
+    (Path(td) / "message_log" / "fam.jsonl").write_text(
+        '{"ts": 1, "umo": "feishu::u1", "sender": "小飞", "text": "旧数据"}\n', encoding="utf-8"
+    )
+    (Path(td) / "message_log" / "foo_bar.jsonl").write_text(
+        '{"ts": 2, "umo": "qq::u2", "sender": "阿Q", "text": "组1旧数据"}\n', encoding="utf-8"
+    )
+    (Path(td) / "archive" / "groups").mkdir(parents=True, exist_ok=True)
+    (Path(td) / "archive" / "groups" / "1000_fam.json").write_text("{}", encoding="utf-8")
+
+    storage_mod.migrate_keys_to_group_id(config, user_groups)
+
+    # aliases/pins 已从组名 key 迁移为组 ID key
+    assert config["aliases"]["g-aaaaaaaa"]["feishu::u1"] == "小飞", config["aliases"]
+    assert config["aliases"]["g-bbbbbbbb"]["qq::u2"] == "阿Q", config["aliases"]
+    assert "fam" not in config["aliases"] and "foo!bar" not in config["aliases"]
+    assert config["pins"]["g-aaaaaaaa"] == "旧置顶", config["pins"]
+    assert "fam" not in config["pins"]
+
+    # 消息流水文件已重命名为按组 ID 命名；foo!bar 的旧数据正确归到 g-bbbbbbbb，
+    # 不会因为撞车而混进 foo bar（g-cccccccc）
+    assert (Path(td) / "message_log" / "g-aaaaaaaa.jsonl").exists()
+    assert (Path(td) / "message_log" / "g-bbbbbbbb.jsonl").exists()
+    assert not (Path(td) / "message_log" / "fam.jsonl").exists()
+    assert not (Path(td) / "message_log" / "foo_bar.jsonl").exists()
+    g_bbbbbbbb_log = storage_mod.read_message_log("g-bbbbbbbb")
+    assert len(g_bbbbbbbb_log) == 1 and g_bbbbbbbb_log[0]["sender"] == "阿Q"
+
+    # 归档文件同样按组 ID 重命名
+    assert (Path(td) / "archive" / "groups" / "1000_g-aaaaaaaa.json").exists()
+    assert not (Path(td) / "archive" / "groups" / "1000_fam.json").exists()
+
+    # 幂等：再跑一次不报错、不改变已经是新格式的数据
+    storage_mod.migrate_keys_to_group_id(config, user_groups)
+    assert config["aliases"]["g-aaaaaaaa"]["feishu::u1"] == "小飞"
+    assert (Path(td) / "message_log" / "g-aaaaaaaa.jsonl").exists()
+
+    print("PASS migrate aliases/pins/logs/archives from group-name key to group-id key")
+
+
 if __name__ == "__main__":
     test_umo_match()
     test_group_for_umo()
@@ -411,4 +476,5 @@ if __name__ == "__main__":
     test_archive_roundtrip_and_cleanup()
     test_resolve_alias_target()
     test_context_enhancer_media_and_budget()
+    test_migrate_keys_to_group_id()
     print("OK: 全部断言通过")

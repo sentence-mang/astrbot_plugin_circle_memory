@@ -74,7 +74,7 @@ from circle_memory_core.groups import (
     valid_group_name,
 )
 from circle_memory_core.shared_session import SharedSessionManager
-from circle_memory_core.storage import save_user_groups
+from circle_memory_core.storage import migrate_keys_to_group_id, save_user_groups
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,13 @@ class CircleMemoryStar(Star):
         except Exception as e:
             logger.error("[CircleMemory] 组 ID 规范化失败: %s", e)
 
-        # 迁移在 initialize()（激活时，事件循环内）与首次 LLM 请求（懒迁移）执行
+        # aliases/pins/消息流水/归档：组名 key → 组 ID key（幂等，1.3.0 起）
+        try:
+            migrate_keys_to_group_id(self.config, self.config.get("user_groups", []))
+        except Exception as e:
+            logger.error("[CircleMemory] aliases/pins key 迁移失败: %s", e)
+
+        # 共享会话迁移在 initialize()（激活时，事件循环内）与首次 LLM 请求（懒迁移）执行
 
     async def initialize(self) -> None:
         """插件激活时执行：迁移旧版共享会话（uuid → 组 ID）。幂等。"""

@@ -1,0 +1,10 @@
+# ruff 0.16.0 起默认规则集从 59 条扩到 413 条（BLE001/RUF022/I001 等开始默认启用），
+# CI 里是 `pip install ruff`（不锁版本），不显式指定 select 就会随 ruff 升级无预警变红。
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# main.py 需先处理 sys.path 再 import 插件子模块，E402 属预期
+"main.py" = ["E402"]

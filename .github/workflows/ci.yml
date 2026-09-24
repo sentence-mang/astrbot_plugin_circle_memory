@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      # test_pure.py / test_integration.py 都会 import astrbot（作为依赖包），
+      # test_integration.py 还会跑真实的 ConversationManager + SQLiteDatabase，
+      # 所以两个测试文件都需要装真实 astrbot，而不是 stub。
+      - name: Install astrbot
+        run: pip install astrbot
+
+      - name: Run pure-function tests
+        run: python3 test_pure.py
+
+      - name: Run integration tests
+        run: python3 test_integration.py

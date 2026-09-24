@@ -89,7 +89,10 @@ class CommandHandlers:
             if last is not None and now - last < self.DEDUP_TTL:
                 return
             cache[fp] = now
-            append_message_log(group, umo, sender, text)
+            g = find_group(self.star.config, group)
+            gid = g.get("id") if g else None
+            if gid:
+                append_message_log(gid, umo, sender, text)
         except Exception as e:
             logger.debug("[CircleMemory] 记录消息流水失败（忽略）: %s", e)
 
@@ -123,7 +126,7 @@ class CommandHandlers:
     # ---------- 退出数据处理（双策略） ----------
 
     async def _handle_exit_data(
-        self, event, group_name: str, umo: str, sender_name: str, kicked: bool = False
+        self, event, group_name: str, group_id: str, umo: str, sender_name: str, kicked: bool = False
     ) -> None:
         """按 exit_data_policy 处理退出/被踢成员的数据。
 
@@ -134,7 +137,7 @@ class CommandHandlers:
         policy = self.star.config.get("exit_data_policy", EXIT_DATA_POLICY_DEFAULT)
         if policy != "mine_only":
             return
-        records = read_message_log(group_name, umo)
+        records = read_message_log(group_id, umo) if group_id else []
         if not records:
             return
         lines = []
@@ -146,7 +149,7 @@ class CommandHandlers:
         if not lines:
             return
         content = "\n".join(lines)
-        path = write_personal_archive(group_name, umo, sender_name, records)
+        path = write_personal_archive(group_name, group_id, umo, sender_name, records)
         saved = "（已保存到服务器）" if path else "（服务器保存失败）"
         verb = "被移出" if kicked else "退出"
         msg = (
@@ -349,7 +352,7 @@ class CommandHandlers:
             )
 
         # 4. 按策略处理退出者数据（mine_only 时导出其个人发言）
-        await self._handle_exit_data(event, target_name, umo, event.get_sender_name())
+        await self._handle_exit_data(event, target_name, target.get("id"), umo, event.get_sender_name())
 
         if not remaining:
             await event.send(event.plain_result(
@@ -428,7 +431,7 @@ class CommandHandlers:
             )
 
         # 4. 按策略处理被移除成员数据
-        await self._handle_exit_data(event, group_name, target_umo, "", kicked=True)
+        await self._handle_exit_data(event, group_name, target.get("id"), target_umo, "", kicked=True)
 
         if not remaining:
             await event.send(event.plain_result(
@@ -628,7 +631,7 @@ class CommandHandlers:
             if target is None:
                 await event.send(event.plain_result(f"组「{group_name}」不存在"))
                 return
-            aliases = (self.star.config.get("aliases") or {}).get(group_name) or {}
+            aliases = (self.star.config.get("aliases") or {}).get(target.get("id")) or {}
             lines = [f"组「{group_name}」成员昵称："]
             for m in target.get("umos", []):
                 nick = aliases.get(m)
@@ -665,7 +668,8 @@ class CommandHandlers:
                 ))
                 return
 
-        aliases = dict((self.star.config.get("aliases") or {}).get(group_name) or {})
+        gid = target.get("id")
+        aliases = dict((self.star.config.get("aliases") or {}).get(gid) or {})
         if nick == "-":
             aliases.pop(target_umo, None)
             msg = f"已删除 {target_umo} 的昵称"
@@ -673,7 +677,7 @@ class CommandHandlers:
             aliases[target_umo] = nick
             msg = f"已设置 {target_umo} 的昵称为「{nick}」"
         all_aliases = dict(self.star.config.get("aliases") or {})
-        all_aliases[group_name] = aliases
+        all_aliases[gid] = aliases
         save_aliases(self.star.config, all_aliases)
         await event.send(event.plain_result(msg))
 
@@ -715,15 +719,16 @@ class CommandHandlers:
             ))
             return
 
+        gid = target.get("id")
         pins = dict(self.star.config.get("pins") or {})
         if content == "-":
-            pins.pop(group_name, None)
+            pins.pop(gid, None)
             msg = f"已清除组「{group_name}」的置顶"
         else:
             if len(content) > 500 or any(ord(c) < 32 for c in content):
                 await event.send(event.plain_result("置顶内容不合法：需为 1-500 个可见字符"))
                 return
-            pins[group_name] = content
+            pins[gid] = content
             msg = f"已设置组「{group_name}」置顶（每轮共享会话请求都会带上）"
         save_pins(self.star.config, pins)
         await event.send(event.plain_result(msg))
@@ -758,7 +763,7 @@ class CommandHandlers:
             await event.send(event.plain_result(f"组「{group_name}」暂无共享历史"))
             return
         try:
-            provider = await self.star.context.get_using_provider_async()
+            provider = await self.star.context.get_using_provider_async(umo)
             if not provider:
                 await event.send(event.plain_result("当前没有可用的 LLM provider，无法生成摘要"))
                 return

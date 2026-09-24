@@ -1,9 +1,9 @@
 # astrbot_plugin_circle_memory
 
-跨平台共享上下文插件（circle_memory）：将多个平台的多个会话组织为**会话组**，组内所有会话共享同一份对话历史。任何第三方插件均可通过组 ID 直接定位组共享会话，无需适配。
+跨平台共享上下文插件（circle_memory）：在飞书聊了一半的对话，切到微信、QQ 接着聊，AI 记得之前说过什么——把多个平台的多个会话组织成同一个**会话组**，组内共享同一份对话历史。组的身份是一个稳定的组 ID，任何第三方插件都可以直接用这个 ID 读写组共享会话，无需适配。
 
 - **作者**: sentence-mang
-- **版本**: 1.2.0
+- **版本**: 1.3.0
 - **兼容性**: AstrBot >= 4.0.0
 - **许可证**: MIT
 - **仓库**: https://github.com/sentence-mang/astrbot_plugin_circle_memory
@@ -193,7 +193,9 @@ await cm.add_message_pair(
 
 从 1.1.x 升级到 1.2.0：配置自动扩展新键（`exit_data_policy` 等），无数据迁移；消息流水自启用起记录（历史消息不补记）。
 
-迁移日志关键字：`[CircleMemory] 组 %s 共享会话已迁移为组 id %s`。
+从 1.2.x 升级到 1.3.0：`aliases`/`pins` 从「组名为 key」自动迁移为「组 ID 为 key」；消息流水与归档文件从按组名命名（sanitize 后）自动重命名为按组 ID 命名，解决不同组名 sanitize 后可能撞成同一个文件的问题；插件加载时（`__init__`）自动执行，幂等、单组失败不影响其他组，无需手动操作。
+
+迁移日志关键字：`[CircleMemory] 组 %s 共享会话已迁移为组 id %s`（会话迁移）；aliases/pins/文件 key 迁移失败会记 `[CircleMemory] ... 迁移失败`，成功不单独打印（静默完成）。
 
 ## 11. 测试
 
@@ -215,12 +217,16 @@ python3 test_integration.py # 集成测试（需在 AstrBot 环境内运行）
 - **reset 语义**：组内成员 `/reset` 会话后，下一次请求会因共享机制自动切回组会话（个人视角重置不生效）；如需清空组历史请由组管理员 `dissolve` 后重建；
 - **增量注入保缓存**：真合并历史天然连续，不做"临时注入式"的增量注入；token 控制由 `history_budget` 预算折叠承担；
 - `mine_only` 个人发言导出仅覆盖**插件启用后**记录的流水（消息流水自部署起记录，不补记历史消息）；
-- 图片转述（`caption`）与摘要功能会消耗 LLM token，默认关闭或按需启用。
+- 图片转述（`caption`）与摘要功能会消耗 LLM token，默认关闭或按需启用；
+- **provider（模型）选择不随组统一**：AstrBot 支持按会话（UMO）设置独立的 provider 偏好，circle_memory 只统一对话历史，不统一这项设置——如果组内不同平台的会话各自配置了不同的模型，回复共享对话的模型会随"当前是谁在说话"切换。circle_memory 自身发起的图片转述/摘要调用会尝试跟随触发者的会话 provider 偏好（未配置时退回全局默认），但正式回复由 AstrBot 核心按触发消息的 UMO 解析 provider，circle_memory 无法干预；
+- **主动消息 / 第三方插件主动调用 LLM 可能绕过共享机制**：circle_memory 依赖 AstrBot 的 `on_waiting_llm_request`/`on_llm_request` 钩子在每次真实消息触发的 LLM 请求前完成会话切换。如果其他插件使用 `Context.llm_generate()`/`Context.tool_loop_agent()` 主动对组内成员发起 LLM 调用（而不是通过一条真实的用户消息触发），这两个钩子不会被触发，circle_memory 的会话切换与上下文增强（媒体降级/成员标注/预算折叠）都不会生效；如果调用方遵循 AstrBot 推荐的写法（调用前用 `ConversationManager.get_curr_conversation_id(umo)` 取当前对话），且该成员在加入组后已发生过至少一次真实消息，会话已经处于切换状态，可能凑巧拿到正确的共享历史，但这不是 circle_memory 主动保证的；
+- **`group_message_history_enable` 群聊消息历史不受影响**：AstrBot 另有一套独立的、默认关闭的群聊消息历史（按平台+UMO 存储，与本插件统一的 `conversation.content` 是两套数据），circle_memory 目前不会同步/合并这部分数据。
 
 ## 13. 版本历史
 
 | 版本 | 变更 |
 |---|---|
+| 1.3.0 | 技术债与健壮性：aliases/pins/消息流水/归档文件统一从「组名为 key」迁移为「组 ID 为 key」（幂等迁移，解决组名 sanitize 后可能撞车导致跨组数据混淆的问题）；`_apply_member_context` 简化为直接按组 ID 查组；circle_memory 自身的图片转述/摘要 LLM 调用改为跟随触发者会话的 provider 偏好（对齐 AstrBot 核心同一模式）；修复 `shared_session.py` 缺失 `import json`（`get_group_content` 在 content 为字符串时会静默失败）、`image_window` 图片轮数控制的差一错误（多保留一条）；`caption_provider_id` 从未使用的幽灵配置项改为真正生效；`get_using_provider` 改为非废弃的 `get_using_provider_async`；退出流水时间戳补上时区；新增 CI（ruff + 测试）；README 补充已知限制（provider 会话隔离、主动消息 / 第三方插件绕过共享机制、群聊消息历史为独立存储） |
 | 1.2.0 | 架构规整（薄壳 + circle_memory_core 子包）；改名 circle_memory（避免市场同名）；退出机制（remove 踢人、退出/移除通知、解散归档、exit_data_policy 双策略、消息流水）；上下文增强（media_mode 媒体降级、成员标注单次注入、历史预算折叠 + AI 摘要、image_window 图片轮数）；alias/pin/summary 命令；leave 序号/all；dissolve 二次确认；消息去重与命令过滤 |
 | 1.1.3 | 解散权限收紧：仅创建组的会话（组管理员）可解散，创建者退出自动移交组主；组数据新增 owner 字段并自动迁移 |
 | 1.1.2 | 权限隔离加固：组 ID 不再对组外会话可见（list 仅显示组名、id 拒绝组外查询，仅管理员可组外查询）；跨组成员明细隔离；`leave`/`dissolve`/`code`/`id` 组名改为可选（省略=当前会话所在组） |
